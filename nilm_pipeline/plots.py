@@ -106,7 +106,7 @@ def plot_importancias(imp: dict, top: int = 20):
     return fig
 
 
-def plot_leaderboard(df, x: str = "nodos_totales", y: str = "mix_c_f1_micro", y2: str = "ind_c_f1_micro"):
+def plot_leaderboard(df, x: str = "nodos_totales", y: str = "todas_c_f1_micro", y2: str = "comb_c_f1_micro"):
     """Métrica vs costo del modelo, un punto por experimento."""
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.scatter(df[x], df[y], label=y)

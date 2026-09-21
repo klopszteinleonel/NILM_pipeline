@@ -4,11 +4,13 @@ Entrenamiento y validación cruzada por grupos con mezcla dentro del fold.
 Flujo por fold (ver AGENTS.md):
     train: individuales(train) + mixes(train) -> filtro -> ventanas -> DC/norm
            -> augment -> features -> fit
-    test:  tres bloques evaluados con el mismo modelo
-             ind  = individuales(test) (+ "sin carga")
-             mix  = mixes sintéticos generados SOLO desde individuales(test)
-             real = combinadas reales (fuera de los folds; se promedian las
-                    probabilidades de los modelos de todos los folds)
+    test:  bloques de capturas REALES evaluados con el mismo modelo
+             ind   = individuales reales (+ "sin carga") del fold de test
+             comb  = combinadas reales (fuera de los folds; se promedian las
+                     probabilidades de los modelos de todos los folds)
+             todas = ind + comb: rendimiento global sobre capturas reales
+             mix   = (opcional, mix_test=True) mezclas sintéticas desde
+                     individuales(test); apagado por default
 
 Anti-leakage: el split es por captura (grupo) y se hace ANTES de mezclar y
 aumentar. La CV se estratifica por la clase de la individual (y 1-D).
@@ -161,6 +163,15 @@ def mezclas_de(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list, c
     return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo, fs)
 
 
+def preparar_dataset(ds: Dataset, cfg: Config, verbose: bool = True) -> Dataset:
+    """Aplica cfg.agrupar y excluye clases con < cfg.min_capturas individuales."""
+    ds = ds.agrupar_clases(cfg.agrupar)
+    ds, raras = ds.excluir_clases_raras(cfg.min_capturas)
+    if raras and verbose:
+        print(f"  clases excluidas por < {cfg.min_capturas} capturas: {raras}")
+    return ds
+
+
 # -------------------------------------------------------------------- CV ----
 
 def _estratos(Y: np.ndarray) -> np.ndarray:
@@ -212,7 +223,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
     """Validación cruzada completa según cfg. Devuelve métricas por bloque
     (ind/mix/real) a nivel ventana (_v_) y captura (_c_), y costo del modelo."""
     t0 = time.time()
-    ds = ds.agrupar_clases(cfg.agrupar)
+    ds = preparar_dataset(ds, cfg, verbose)
     fs = ds.fs()
     clases = ds.clases
     C = len(clases)
@@ -222,7 +233,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
     sen_r, Y_r, G_r = reales.senales(), reales.y(), reales.grupos()
 
     bloques = {b: _bloque_vacio() for b in ("ind", "mix")}
-    P_real_acum, F_real = None, None
+    P_comb_acum, F_comb = None, None
     nombres, imps, costo = nombres_features(cfg, fs), [], {}
 
     folds = list(dividir(Y, G, cfg))
@@ -257,35 +268,33 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 
         # --- combinadas reales: promedio de los modelos de todos los folds
         if len(sen_r):
-            if F_real is None:
-                F_real, Yw_r, Gw_r, _ = armar_conjunto(sen_r, Y_r, G_r, cfg, fs)
-                P_real_acum = np.zeros((len(F_real), C), np.float64)
-            P_real_acum += predecir_proba(modelo, F_real, C)
+            if F_comb is None:
+                F_comb, Yw_r, Gw_r, _ = armar_conjunto(sen_r, Y_r, G_r, cfg, fs)
+                P_comb_acum = np.zeros((len(F_comb), C), np.float64)
+            P_comb_acum += predecir_proba(modelo, F_comb, C)
 
         if verbose:
             print(f"  fold {k + 1}/{len(folds)}: train {len(F_tr)} ventanas, "
                   f"test ind {len(F_te)} | {time.time() - t0:.0f} s")
 
-    bl = {b: _cerrar(v) for b, v in bloques.items()}
-    if F_real is not None:
-        bl["real"] = {"P": (P_real_acum / len(folds)).astype(np.float32), "Y": Yw_r, "grupos": Gw_r}
+    bl = {"ind": _cerrar(bloques["ind"])}
+    if F_comb is not None:
+        bl["comb"] = {"P": (P_comb_acum / len(folds)).astype(np.float32), "Y": Yw_r, "grupos": Gw_r}
+        bl["todas"] = {k: np.concatenate([bl["ind"][k], bl["comb"][k]]) for k in ("P", "Y", "grupos")}
+    else:
+        bl["todas"] = bl["ind"]
+    if bloques["mix"]["P"]:
+        bl["mix"] = _cerrar(bloques["mix"])
 
     met = {}
-    umbrales = None
+    Pg_ind, Yg_ind, _ = agregar_por_grupo(bl["ind"]["P"], bl["ind"]["Y"], bl["ind"]["grupos"])
+    umbrales = umbrales_optimos(Yg_ind, Pg_ind)
     for b, d in bl.items():
-        if len(d["Y"]) == 0:
-            continue
         met.update(metricas_multilabel(d["Y"], d["P"], cfg.umbral, clases, f"{b}_v_"))
         Pg, Yg, _ = agregar_por_grupo(d["P"], d["Y"], d["grupos"])
         met.update(metricas_multilabel(Yg, Pg, cfg.umbral, clases, f"{b}_c_"))
-        if b == "ind":
-            umbrales = umbrales_optimos(Yg, Pg)
-    # bloques mix/real con los umbrales por clase aprendidos en ind (OOF): _u_
-    if umbrales is not None:
-        for b in ("mix", "real"):
-            if b in bl and len(bl[b]["Y"]):
-                Pg, Yg, _ = agregar_por_grupo(bl[b]["P"], bl[b]["Y"], bl[b]["grupos"])
-                met.update(metricas_multilabel(Yg, Pg, umbrales, clases, f"{b}_u_"))
+        if b != "ind":      # umbrales por clase aprendidos en ind (OOF): _u_
+            met.update(metricas_multilabel(Yg, Pg, umbrales, clases, f"{b}_u_"))
     met.update(costo)
     met["n_features"] = len(nombres)
     met["n_folds"] = len(folds)
@@ -306,7 +315,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 def entrenar_final(ds: Dataset, cfg: Config, verbose: bool = True):
     """Entrena con TODAS las individuales (+ mixes + augment) para exportar.
     Devuelve (modelo, nombres_features, clases)."""
-    ds = ds.agrupar_clases(cfg.agrupar)
+    ds = preparar_dataset(ds, cfg, verbose=False)
     fs = ds.fs()
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], ds.clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()
@@ -339,7 +348,7 @@ def registrar(res: Resultado, ruta_csv: str | Path, manifest_hash: str = "") -> 
     nuevo.to_csv(ruta, index=False)
 
 
-def cargar_leaderboard(ruta_csv: str | Path, ordenar_por: str = "mix_c_f1_macro"):
+def cargar_leaderboard(ruta_csv: str | Path, ordenar_por: str = "todas_c_f1_micro"):
     import pandas as pd
     df = pd.read_csv(ruta_csv)
     if ordenar_por in df.columns:
@@ -354,7 +363,7 @@ def robustez_snr(modelo, ds: Dataset, cfg: Config, snrs=(40, 30, 20, 15, 10, 5),
     """F1 micro (por captura) sobre las individuales con ruido a distintos SNR.
     Nota: usa las mismas capturas con las que puede haberse entrenado `modelo`;
     sirve para medir degradación relativa, no rendimiento absoluto."""
-    ds = ds.agrupar_clases(cfg.agrupar)
+    ds = preparar_dataset(ds, cfg, verbose=False)
     fs = ds.fs()
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], ds.clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()

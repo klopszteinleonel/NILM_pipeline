@@ -3,12 +3,13 @@ Extracción de features por ventana. Dos estrategias intercambiables:
 
   compact  (~45 feats): tiempo + armónicas de f_red + estadísticos espectrales
                         + energía por bandas. Pensada para el ESP32-S3.
-  rawfft   (base): magnitud de los bins directos de la FFT (sin el bin DC,
-             que se anula al quitar la media) hasta rawfft_fmax, más RMS y pico
-             absolutos. Con W=2048 a 10 kHz: 409 bins de 4.88 Hz + 2 = 411
-             features. Es exactamente lo que calcula el borde (FFT radix-2 de
-             W puntos, |X|·2/Σw), sin interpolar. La dimensión depende de W y
-             fs: cada modelo se entrena y despliega con un único W.
+  rawfft   (base): SOLO la magnitud de los bins directos de la FFT (sin el
+             bin DC, que se anula al quitar la media) hasta rawfft_fmax. Con
+             W=2048 a 10 kHz: 409 bins de 4.88 Hz. Es exactamente lo que
+             calcula el borde (FFT radix-2 de W puntos, |X|·2/Σw), sin
+             interpolar. La amplitud absoluta va implícita en los bins (se
+             multiplican por `escala` si hubo normalización). La dimensión
+             depende de W y fs: cada modelo se entrena y despliega con un único W.
 
 Decisión A (amplitud absoluta): `extraer_features` recibe `escala` (factor por
 el que preprocess.py dividió cada ventana) y lo usa para expresar RMS, pico y
@@ -144,12 +145,10 @@ def bins_rawfft(cfg: Config, fs: float) -> np.ndarray:
 
 
 def nombres_features(cfg: Config, fs: float = 10000.0) -> list:
-    nombres = ["rms_A", "pico_A"]
     if cfg.estrategia == "rawfft":
         df = fs / cfg.n_fft_efectivo
-        nombres += [f"fft_{k * df:.2f}Hz" for k in bins_rawfft(cfg, fs)]
-        return nombres
-    nombres += ["cresta", "zcr", "curtosis", "asimetria", "h1_A"]
+        return [f"fft_{k * df:.2f}Hz" for k in bins_rawfft(cfg, fs)]
+    nombres = ["rms_A", "pico_A", "cresta", "zcr", "curtosis", "asimetria", "h1_A"]
     suf = "_rel" if cfg.normalizar_forma else "_A"
     nombres += [f"h{k}{suf}" for k in range(2, cfg.n_armonicas + 1)]
     nombres += ["thd", "par_impar", "frac_armonica",
@@ -167,14 +166,14 @@ def extraer_features(V: np.ndarray, escala: np.ndarray, cfg: Config, fs: float,
     if V.ndim != 2 or escala.shape != (V.shape[0],):
         raise ValueError(f"shapes incompatibles: V {V.shape}, escala {escala.shape}")
     mag, freqs = espectro(V, cfg, fs)
-    tiempo = _tiempo(V, escala)
     nombres = nombres_features(cfg, fs)
 
     if cfg.estrategia == "rawfft":
-        raw = mag[:, bins_rawfft(cfg, fs)] * escala[:, None]
-        F = np.column_stack([tiempo[:, :2], raw])
+        F = mag[:, bins_rawfft(cfg, fs)] * escala[:, None]
         assert F.shape[1] == len(nombres), (F.shape, len(nombres))
         return F.astype(np.float32), nombres
+
+    tiempo = _tiempo(V, escala)
 
     f0 = estimar_f0(mag, freqs, cfg.f_red) if cfg.f0_estimar \
         else np.full(V.shape[0], cfg.f_red, dtype=np.float32)

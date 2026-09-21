@@ -42,6 +42,9 @@ class Config:
     agrupar: dict = field(default_factory=dict)  # clase -> grupo, ej. {"calefon": "resistiva",
                                     # "horno": "resistiva"}: clases físicamente indistinguibles
                                     # (misma amplitud, THD ~0) se evalúan y exportan como una
+    min_capturas: int = 3           # clases con menos capturas individuales se EXCLUYEN
+                                    # (sus capturas y las combinadas que las contienen):
+                                    # con 1–2 capturas no se pueden aprender ni evaluar
     min_capturas_aviso: int = 3     # avisa si una clase tiene menos capturas
     f_red: float = 50.0             # frecuencia de red [Hz]
     clase_nada: str = "nada"        # categoria reservada para "sin carga" → vector cero
@@ -65,16 +68,17 @@ class Config:
     # ---------------- mezcla sintética ----------------
     mix_habilitado: bool = True
     mix_k: tuple = (2, 3)           # (min, max) cargas simultáneas
-    mix_total: int = 400            # combinadas sintéticas para train (por fold)
-    mix_test: bool = True           # también sintetizar desde las capturas de test
-    mix_test_total: int = 100       # combinadas sintéticas para test (por fold)
+    mix_total: int = 100            # combinadas sintéticas para train (por fold)
+    mix_test: bool = False          # mezclas sintéticas también como bloque de test
+                                    # (apagado: las combinadas reales son el test)
+    mix_test_total: int = 100       # combinadas sintéticas para test (si mix_test)
     mix_escala: tuple = (0.95, 1.05)  # escalado de amplitud por carga (±5 % ~ red)
     mix_misma_clase: bool = False   # permitir 2 cargas de la misma clase
     mix_sesgo_grande_chica: float = 0.5  # fracción de mixes que fuerzan grande+chica
-    mix_prob_fondo: float = 0.5     # prob. de sumar una captura "sin carga" como fondo
-    mix_fase: str = "alineada"      # "alineada": fundamentales en fase (+ jitter) como
+    mix_fase: str = "alineada"      # "alineada": fundamentales exactamente en fase, como
                                     # cargas reales colgadas de la misma red; "aleatoria"
-    mix_jitter_fase: float = 30.0   # grados de jitter alrededor de la alineación
+    mix_jitter_fase: float = 0.0    # grados de desfase aleatorio (±) entre cargas; 0 en la
+                                    # base. Referencia: ±2 Hz sobre un ciclo de 50 Hz ≡ ±14.4°
 
     # ---------------- augmentación (solo train) ----------------
     aug_n: int = 0                  # copias aumentadas por ventana (0 = sin augment:
@@ -100,9 +104,9 @@ class Config:
     normalizar_forma: bool = True   # vector armónico como H_k/H1 (las absolutas quedan)
     bandas_hz: tuple = (0.0, 100.0, 300.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0)
                                     # bordes de bandas para energía fraccional
-    rawfft_fmax: float = 2000.0     # rawfft = bins directos de la FFT (sin DC) hasta esta
-                                    # frecuencia + rms/pico absolutos. Con W=2048 y fs=10 kHz:
-                                    # 409 bins de 4.88 Hz. Es exactamente lo que calcula el borde.
+    rawfft_fmax: float = 2000.0     # rawfft = SOLO los bins directos de la FFT (sin DC) hasta
+                                    # esta frecuencia. Con W=2048 y fs=10 kHz: 409 bins de
+                                    # 4.88 Hz. Es exactamente lo que calcula el borde.
 
     # ---------------- modelo ----------------
     modelo: str = "rf"              # rf|et|hgb|svm|knn|logreg
@@ -131,8 +135,8 @@ class Config:
             e.append(f"mix_k={self.mix_k} debe ser (min, max) con 2 <= min <= max")
         if not (0.0 <= self.mix_sesgo_grande_chica <= 1.0):
             e.append("mix_sesgo_grande_chica debe estar en [0, 1]")
-        if not (0.0 <= self.mix_prob_fondo <= 1.0):
-            e.append("mix_prob_fondo debe estar en [0, 1]")
+        if self.min_capturas < 1:
+            e.append("min_capturas debe ser >= 1")
         if self.mix_fase not in ("alineada", "aleatoria"):
             e.append("mix_fase debe ser 'alineada' o 'aleatoria'")
         if self.rawfft_fmax <= 0:

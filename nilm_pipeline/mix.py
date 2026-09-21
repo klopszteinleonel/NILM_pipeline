@@ -5,14 +5,16 @@ sobre la misma red), así que la mezcla es una suma en el dominio del tiempo
 con escala aleatoria (±5 %) por carga.
 
 Fase (`mix_fase`): cada captura individual arranca en una fase de red
-arbitraria, pero en la realidad todas las cargas cuelgan de la misma tensión
-y sus fundamentales están casi en fase (resistivas: 0°; motores: 20–40° de
-atraso). Con "alineada" se rota cada carga para que su fundamental de f_red
-quede en fase 0 y se aplica un jitter de ±mix_jitter_fase grados: las
-amplitudes resultantes caen cerca de la suma lineal, como en las combinadas
-reales medidas (aire+horno real 8.3–8.6 A vs 8.27 lineal / 6.2 cuadrática).
-Con "aleatoria" (comportamiento anterior) el shift es uniforme y la amplitud
-cae en cualquier punto entre la suma cuadrática y la lineal.
+arbitraria, pero en la realidad todas las cargas cuelgan de la misma tensión.
+Con "alineada" se rota cada carga para que su fundamental de f_red quede en
+fase 0 (opcionalmente ± `mix_jitter_fase` grados): las amplitudes resultantes
+caen cerca de la suma lineal, como en las combinadas reales medidas
+(aire+horno real 8.3–8.6 A vs 8.27 lineal / 6.2 cuadrática). Con "aleatoria"
+el shift es uniforme y la amplitud cae en cualquier punto entre la suma
+cuadrática y la lineal.
+
+El fondo (ruido, cargas parásitas) ya está implícito en cada captura
+individual; no se suma nada extra.
 
 Anti-leakage: esta función NO sabe de splits. El llamador le pasa solo las
 capturas de train (o solo las de test) del fold, y las mezclas resultantes
@@ -64,7 +66,7 @@ def alinear_fase(x: np.ndarray, fs: float, f_red: float, fase_objetivo: float = 
 
 
 def combinar(senales_sel: list, rng: np.random.Generator, mix_escala: tuple, fs: float,
-             f_red: float = 50.0, modo: str = "alineada", jitter_grados: float = 30.0,
+             f_red: float = 50.0, modo: str = "alineada", jitter_grados: float = 0.0,
              shift: bool = True) -> np.ndarray:
     """Suma en tiempo de varias señales con escala aleatoria por carga.
     modo="alineada": fundamentales en fase 0 ± jitter; "aleatoria": shift uniforme.
@@ -75,7 +77,7 @@ def combinar(senales_sel: list, rng: np.random.Generator, mix_escala: tuple, fs:
         s = np.asarray(s[:n], dtype=np.float32)
         if shift:
             if modo == "alineada":
-                objetivo = np.deg2rad(rng.uniform(-jitter_grados, jitter_grados))
+                objetivo = np.deg2rad(rng.uniform(-jitter_grados, jitter_grados)) if jitter_grados > 0 else 0.0
                 s = alinear_fase(s, fs, f_red, objetivo)
             else:
                 s = np.roll(s, int(rng.integers(0, n)))
@@ -97,8 +99,8 @@ def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clas
                           prefijo: str = "mix", fs: float = 10000.0) -> Mezclas:
     """Genera `total` mezclas de K ∈ mix_k cargas desde capturas individuales.
 
-    - Solo usa capturas con exactamente una clase activa como fuente de cargas.
-    - Capturas "sin carga" (vector cero) se suman como fondo con prob. mix_prob_fondo.
+    - Solo usa capturas con exactamente una clase activa como fuente de cargas
+      (las "sin carga" no participan: el fondo ya está en cada captura).
     - Etiqueta = OR de los multi-hot; grupo = f"{prefijo}_{i:04d}".
     """
     Y = np.asarray(Y, dtype=np.uint8)
@@ -107,7 +109,6 @@ def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clas
     por_clase = {c: np.where((activas == 1) & (Y[:, j] == 1))[0]
                  for j, c in enumerate(clases)}
     por_clase = {c: idx for c, idx in por_clase.items() if len(idx)}
-    fondos = np.where(activas == 0)[0]
     disponibles = list(por_clase)
     if len(disponibles) < 2:
         raise ValueError(f"se necesitan >= 2 clases con capturas individuales, hay {len(disponibles)}")
@@ -133,8 +134,6 @@ def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clas
             elegidas += [str(x) for x in np.atleast_1d(extra)]
 
         idx = [int(rng.choice(por_clase[c])) for c in elegidas]
-        if len(fondos) and rng.random() < cfg.mix_prob_fondo:
-            idx.append(int(rng.choice(fondos)))
 
         out_senales.append(combinar([senales[j] for j in idx], rng, cfg.mix_escala, fs,
                                     cfg.f_red, cfg.mix_fase, cfg.mix_jitter_fase))

@@ -35,10 +35,11 @@ def metricas_multilabel(Y: np.ndarray, P: np.ndarray, umbral: float | np.ndarray
         "precision_macro": float(precision_score(Y, Yp, average="macro", zero_division=0)),
         "recall_macro": float(recall_score(Y, Yp, average="macro", zero_division=0)),
     }
-    if clases is not None:
+    if clases is not None:      # F1 por clase solo para clases presentes en el bloque
         f1c = f1_score(Y, Yp, average=None, zero_division=0)
-        for c, f in zip(clases, f1c):
-            m[f"f1_{c}"] = float(f)
+        for j, (c, f) in enumerate(zip(clases, f1c)):
+            if Y[:, j].sum() > 0:
+                m[f"f1_{c}"] = float(f)
     return {prefijo + k: v for k, v in m.items()}
 
 
@@ -87,24 +88,31 @@ def importancias(modelo, nombres: list) -> dict:
     return dict(sorted(zip(nombres, media.tolist()), key=lambda kv: -kv[1]))
 
 
-def reporte(metricas: dict, clases: list, bloques=("ind", "mix", "real")) -> str:
+def reporte(metricas: dict, clases: list,
+            bloques=(("ind", "REALES individuales"), ("comb", "REALES combinadas"),
+                     ("todas", "REALES todas (ind+comb)"), ("mix", "sintéticas (mix)"))) -> str:
+    """Tabla por bloque de capturas reales: por ventana, por captura (media de
+    probabilidades de sus ventanas, umbral 0.5) y por captura con umbrales por
+    clase aprendidos en las individuales out-of-fold (+umbr)."""
     lineas = []
-    cab = ("bloque", "n", "exact", "hamming", "f1_micro", "f1_macro", "prec", "rec")
-    lineas.append(f"{cab[0]:14s}" + "".join(f"{c:>9s}" for c in cab[1:]))
-    etiqueta_nivel = {"v": "ventana", "c": "captura", "u": "captura+umbr"}
-    for b in bloques:
+    cab = ("n", "exact", "hamming", "f1_micro", "f1_macro", "prec", "rec")
+    etiqueta_nivel = {"v": "por ventana", "c": "por captura", "u": "por captura +umbr"}
+    for b, titulo in bloques:
+        if f"{b}_c_n" not in metricas:
+            continue
+        lineas.append(f"{titulo:24s}" + "".join(f"{c:>9s}" for c in cab))
         for nivel in ("v", "c", "u"):
             p = f"{b}_{nivel}_"
             if p + "n" not in metricas:
                 continue
-            fila = (f"{b}/{etiqueta_nivel[nivel]}",
-                    str(metricas[p + "n"]),
+            vals = (str(metricas[p + "n"]),
                     *(f"{metricas[p + k]:.3f}" for k in
                       ("exact_match", "hamming", "f1_micro", "f1_macro", "precision_macro", "recall_macro")))
-            lineas.append(f"{fila[0]:14s}" + "".join(f"{v:>9s}" for v in fila[1:]))
-    if any(f"ind_c_f1_{c}" in metricas for c in clases):
-        lineas.append("F1 por clase (individuales, por captura): " + ", ".join(
-            f"{c}={metricas.get(f'ind_c_f1_{c}', float('nan')):.2f}" for c in clases))
+            lineas.append(f"  {etiqueta_nivel[nivel]:22s}" + "".join(f"{v:>9s}" for v in vals))
+    for b, titulo in (("ind", "individuales"), ("comb", "combinadas")):
+        if any(f"{b}_c_f1_{c}" in metricas for c in clases):
+            lineas.append(f"F1 por clase, {titulo} reales (por captura): " + ", ".join(
+                f"{c}={metricas[f'{b}_c_f1_{c}']:.2f}" for c in clases if f"{b}_c_f1_{c}" in metricas))
     costo = {k: metricas[k] for k in ("n_features", "n_arboles", "nodos_totales", "prof_max") if k in metricas}
     if costo:
         lineas.append("costo modelo: " + ", ".join(f"{k}={v}" for k, v in costo.items()))

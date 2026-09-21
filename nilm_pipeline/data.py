@@ -103,6 +103,18 @@ class Dataset:
         clases = sorted({c for r in regs for c in r.clases})
         return Dataset(regs, clases, self.manifest_filas, self.manifest_hash, self.problemas)
 
+    def excluir_clases_raras(self, min_capturas: int) -> tuple["Dataset", list]:
+        """Quita las clases con menos de `min_capturas` capturas individuales,
+        sus capturas y toda combinada que las contenga. Devuelve (dataset, excluidas)."""
+        conteo = {c: sum(1 for r in self.registros if r.tipo == TIPO_INDIVIDUAL and r.clases == (c,))
+                  for c in self.clases}
+        raras = sorted(c for c, n in conteo.items() if n < min_capturas)
+        if not raras:
+            return self, []
+        regs = [r for r in self.registros if not set(r.clases) & set(raras)]
+        clases = sorted({c for r in regs for c in r.clases})
+        return Dataset(regs, clases, self.manifest_filas, self.manifest_hash, self.problemas), raras
+
     def resumen(self, min_capturas_aviso: int = 3) -> str:
         lineas = [f"Dataset: {len(self.registros)} capturas, "
                   f"{len(self.clases)} clases, fs={self.fs():.0f} Hz, "
