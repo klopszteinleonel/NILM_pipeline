@@ -21,19 +21,27 @@ def binarizar(P: np.ndarray, umbral: float | np.ndarray) -> np.ndarray:
 
 def metricas_multilabel(Y: np.ndarray, P: np.ndarray, umbral: float | np.ndarray,
                         clases: list | None = None, prefijo: str = "") -> dict:
-    """Y (n, C) multi-hot, P (n, C) probabilidades. Devuelve dict plano."""
+    """Y (n, C) multi-hot, P (n, C) probabilidades. Devuelve dict plano.
+    f1_micro cuenta todos los bits juntos; f1/precision/recall_macro promedian
+    por clase con peso igual, solo sobre las clases presentes en Y."""
     Y = np.asarray(Y, dtype=np.uint8)
     Yp = binarizar(P, umbral)
     if len(Y) == 0:
         return {}
+    # Las métricas macro se promedian SOLO sobre las clases presentes en el bloque
+    # (con soporte > 0): una clase ausente daría F1 = 0 por definición y
+    # hundiría el promedio sin que el modelo haya fallado nada.
+    presentes = np.where(Y.sum(axis=0) > 0)[0]
+    kw = dict(average="macro", zero_division=0, labels=presentes if len(presentes) else None)
     m = {
         "n": int(len(Y)),
         "exact_match": float((Y == Yp).all(axis=1).mean()),
         "hamming": float(hamming_loss(Y, Yp)),
         "f1_micro": float(f1_score(Y, Yp, average="micro", zero_division=0)),
-        "f1_macro": float(f1_score(Y, Yp, average="macro", zero_division=0)),
-        "precision_macro": float(precision_score(Y, Yp, average="macro", zero_division=0)),
-        "recall_macro": float(recall_score(Y, Yp, average="macro", zero_division=0)),
+        "f1_macro": float(f1_score(Y, Yp, **kw)),
+        "precision_macro": float(precision_score(Y, Yp, **kw)),
+        "recall_macro": float(recall_score(Y, Yp, **kw)),
+        "n_clases_presentes": int(len(presentes)),
     }
     if clases is not None:      # F1 por clase solo para clases presentes en el bloque
         f1c = f1_score(Y, Yp, average=None, zero_division=0)

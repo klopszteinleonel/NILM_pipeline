@@ -104,9 +104,10 @@ class Config:
     normalizar_forma: bool = True   # vector armónico como H_k/H1 (las absolutas quedan)
     bandas_hz: tuple = (0.0, 100.0, 300.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0)
                                     # bordes de bandas para energía fraccional
-    rawfft_fmax: float = 2000.0     # rawfft = SOLO los bins directos de la FFT (sin DC) hasta
-                                    # esta frecuencia. Con W=2048 y fs=10 kHz: 409 bins de
+    rawfft_fmax: float = 3000.0     # rawfft = SOLO los bins directos de la FFT (sin DC) hasta
+                                    # esta frecuencia. Con W=2048 y fs=10 kHz: 614 bins de
                                     # 4.88 Hz. Es exactamente lo que calcula el borde.
+                                    # (3 kHz > 2 kHz en combinadas reales, mismo costo)
 
     # ---------------- modelo ----------------
     modelo: str = "rf"              # rf|et|hgb|svm|knn|logreg

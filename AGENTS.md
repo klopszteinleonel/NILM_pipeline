@@ -197,31 +197,34 @@ Lección del test de paridad: atrapó un `uint8_t` para el índice de feature
 - `emlearn` quedó instalado en el venv pero no se usa (requiere `setuptools`
   por `distutils` en Python ≥ 3.12).
 
-## Estado (2026-09-21, tarde)
+## Estado (2026-09-21, noche)
 Pasos 1–6 hechos; repos en GitHub; dataset 209 capturas (207 tras excluir
-hidro/secadorpelo). Base = `Config(agrupar=RES)`: rawfft solo bins hasta
-2 kHz, W=2048, mix 100 solo train con fase exactamente alineada, sin augment,
-resistivas agrupadas, min_capturas=3, RF OvR 20×8. Test = SOLO reales.
+hidro/secadorpelo). Base = `Config(agrupar=RES)`: rawfft SOLO bins hasta
+**3 kHz** (614 feats), W=2048, mix 100 solo train con fase exactamente
+alineada (sin jitter), sin augment, resistivas agrupadas, min_capturas=3,
+RF OvR 20×8. Test = SOLO reales. Métricas macro sobre clases presentes.
 
-Referencia local (SGKF5, por captura, F1-micro / exact):
-- individuales reales 0.91 / 0.88 (F1-macro 0.90); combinadas reales 0.83 /
-  0.46 (0.86 / 0.56 con umbrales); todas 0.88 / 0.76 (0.92 / 0.84 con umbrales).
-  10 k nodos ≈ 120 KB en C. 7 s por experimento.
-- Fallos restantes en combinadas: todo lo que tiene heladera (0.09 A) y
-  aire+luces (3/10). aire+resistiva 15/18, aire+lavarropa 8/10.
+Referencia local (SGKF5, por captura, F1-micro / exact, F1-macro):
+- individuales reales 0.93 / 0.90, macro 0.92
+- combinadas reales 0.87 / 0.51, macro 0.71 (0.90 / 0.63 / 0.75 con umbrales)
+- todas 0.91 / 0.79, macro 0.88 (0.94 / 0.86 / 0.91 con umbrales)
+- 10.5 k nodos ≈ 136 KB en C; paridad OK; LOGO ind F1-micro 0.92; ~6 s/exp.
+- Combinadas: aire+resistiva 15/18, aire+lavarropa 9/10, aire+luces 7–8/10,
+  aire+lavarropa+resistiva 6/6; cero en todo lo que tiene heladera (0.09 A)
+  y en lavarropa+resistiva (0/3).
 
-Barrido (todas F1-micro / comb F1-micro / comb exact / nodos):
-fmax3000 0.905/0.871/0.51/10k (MEJOR; LOGO ind 0.934, export 141 KB, paridad OK)
-· fase_aleatoria 0.890/0.856/0.53/12k · rf20x12 0.884/0.830/0.46/15k ·
-rf40x8 0.883/0.840/0.44/20k · base 0.876/0.830/0.46/10k · W4096 0.873/0.830/
-0.42/7k · hp20 0.872/0.835/0.47/10k · jitter_2hz 0.868/0.831/0.37/11k ·
-aug4 0.841/0.784/0.34/36k · fmax1000 0.827/0.769/0.27 · compact 0.823/0.702/
-0.29 · mix400 0.813/0.785/0.25/20k · sin_agrupar 0.803/0.615/0.07 ·
-sin_mix 0.787/0.520/0.00/2k (individuales 0.959, pero cero combinadas).
-Lecturas: las mezclas sintéticas son imprescindibles para detectar combinadas
-(sin_mix → exact 0); 100 mezclas rinden mejor que 400; el jitter de fase no
-ayuda; fase alineada vs aleatoria dentro del ruido; fmax 3 kHz es la mejora
-más consistente; compact y fmax1000 pierden claramente.
+Barrido sobre esa base (todas / comb F1-micro, comb exact, nodos):
+jitter_2hz 0.919/0.895/0.59/12k · fase_aleatoria 0.913/0.898/0.63/12k ·
+fmax5000 0.909/0.861/0.49 · hp20 0.905/0.871/0.51 · base 0.905/0.871/0.51/10k ·
+fmax4000 0.902/0.856/0.49 · rf40x8 0.901/0.866/0.51/20k · rf20x12 0.899/0.846/
+0.46/16k · W4096 0.885/0.842/0.47/7k · fmax2000 0.876/0.830/0.46 · aug4 0.872 ·
+mix400 0.871/0.898/0.63/21k (ind baja a 0.85) · compact 0.823 · sin_agrupar
+0.802/0.613/0.07 · sin_mix 0.803/0.570/0.02 (ind 0.956).
+Lecturas: fmax 3 kHz > 2 kHz claramente; 4–5 kHz no suma. Con 3 kHz las
+variantes de fase (jitter ±14.4°, aleatoria) y mix400 suben combinadas
+(0.87 → 0.90, exact 0.51 → 0.6) pero bajan individuales: hay más variedad
+de mezclas en train; las diferencias son de 2–5 capturas de 59 (ruido).
+Las mezclas sintéticas siguen siendo imprescindibles (sin_mix → exact 0.02).
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:
