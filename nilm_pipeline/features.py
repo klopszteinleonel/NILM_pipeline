@@ -1,0 +1,194 @@
+"""
+Extracción de features por ventana. Dos estrategias intercambiables:
+
+  compact  (~45 feats): tiempo + armónicas de f_red + estadísticos espectrales
+                        + energía por bandas. Pensada para el ESP32-S3.
+  rawfft   : magnitud del espectro 0..rawfft_fmax re-muestreada a rawfft_bins
+             + RMS y pico absolutos. La dimensión fija permite comparar
+             modelos entre W en el leaderboard, pero los valores NO son
+             equivalentes entre W (el ancho de lóbulo cambia): cada modelo se
+             entrena y despliega con un único W. En el borde se usan los bins
+             directos de la FFT de ese W (sin interpolar).
+
+Decisión A (amplitud absoluta): `extraer_features` recibe `escala` (factor por
+el que preprocess.py dividió cada ventana) y lo usa para expresar RMS, pico y
+|H1| en Amperes reales aunque la ventana esté normalizada. Las features de
+forma (H_k/H1, estadísticos, bandas) son invariantes a la escala.
+
+Decisión D (robustez a f0): se estima la frecuencia de red real por
+interpolación parabólica alrededor del pico de f_red, y cada armónica k se
+toma como el pico (interpolado) dentro de ±armonica_tol_bins de k·f0. Así una
+red a 49.8 Hz no corre la armónica 20 fuera del bin.
+
+Espectro: magnitud de un solo lado normalizada por la suma de la ventana, de
+modo que una senoidal de amplitud A da un pico ≈ A. Equivalente en esp-dsp:
+dsps_fft2r_fc32 + |X|·2/Σw.
+
+Precisión medida con senoidal sintética (W=1024..4096): f0 ±0.08 Hz y |H1|
+±3.5 % con hann/hamming/blackman. `rect` sufre fuga espectral (|H1| -12 %) y
+`flattop` estima bien amplitud pero mal f0 (lóbulo ancho): son experimentos.
+"""
+from __future__ import annotations
+
+import numpy as np
+from scipy import stats
+from scipy.signal import windows
+
+from .config import Config
+
+_EPS = 1e-12
+_F0_BUSQUEDA_REL = 0.2      # ±20 % de f_red para buscar el pico de la fundamental
+
+
+def ventana_fft(nombre: str, W: int) -> np.ndarray:
+    """Coeficientes de la ventana (periódica, para análisis espectral)."""
+    if nombre == "rect":
+        return np.ones(W, dtype=np.float32)
+    fn = {"hann": windows.hann, "hamming": windows.hamming,
+          "blackman": windows.blackman, "flattop": windows.flattop}[nombre]
+    return fn(W, sym=False).astype(np.float32)
+
+
+def espectro(V: np.ndarray, cfg: Config, fs: float) -> tuple[np.ndarray, np.ndarray]:
+    """(n, W) -> (mag (n, n_fft//2+1) amplitud de un solo lado, freqs (n_fft//2+1,))."""
+    V = np.asarray(V, dtype=np.float32)
+    w = ventana_fft(cfg.ventana, V.shape[1])
+    n_fft = cfg.n_fft_efectivo
+    X = np.fft.rfft(V * w, n=n_fft, axis=1)
+    mag = (2.0 * np.abs(X) / w.sum()).astype(np.float32)
+    return mag, np.fft.rfftfreq(n_fft, d=1.0 / fs).astype(np.float32)
+
+
+def _pico_parabolico(mag: np.ndarray, k: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Interpolación parabólica en log-magnitud alrededor del bin k (por fila).
+    En dominio log el sesgo con Hann/Hamming es < 0.01 bin.
+    Devuelve (posición fraccional del pico en bins, magnitud del pico)."""
+    n, nb = mag.shape
+    filas = np.arange(n)
+    k = np.clip(k, 1, nb - 2)
+    a, b, c = (np.log(mag[filas, j] + _EPS) for j in (k - 1, k, k + 1))
+    den = a - 2 * b + c
+    seguro = np.abs(den) > _EPS
+    p = np.where(seguro, 0.5 * (a - c) / np.where(seguro, den, 1.0), 0.0)
+    p = np.clip(p, -0.5, 0.5)
+    m = np.exp(b - 0.25 * (a - c) * p)
+    return k + p, m
+
+
+def estimar_f0(mag: np.ndarray, freqs: np.ndarray, f_red: float) -> np.ndarray:
+    """Frecuencia de red real por ventana (Hz), buscando el pico en ±20 % de f_red."""
+    df = float(freqs[1] - freqs[0])
+    lo = max(1, int(np.floor((1 - _F0_BUSQUEDA_REL) * f_red / df)))
+    hi = min(mag.shape[1] - 2, int(np.ceil((1 + _F0_BUSQUEDA_REL) * f_red / df)))
+    k = lo + np.argmax(mag[:, lo:hi + 1], axis=1)
+    pos, _ = _pico_parabolico(mag, k)
+    return (pos * df).astype(np.float32)
+
+
+def armonicas(mag: np.ndarray, freqs: np.ndarray, f0: np.ndarray, n_armonicas: int,
+              tol_bins: int) -> np.ndarray:
+    """Magnitud (interpolada) de las armónicas 1..n_armonicas de f0. (n, n_armonicas)."""
+    n, nb = mag.shape
+    df = float(freqs[1] - freqs[0])
+    filas = np.arange(n)[:, None]
+    offsets = np.arange(-tol_bins, tol_bins + 1)
+    H = np.zeros((n, n_armonicas), dtype=np.float32)
+    for k in range(1, n_armonicas + 1):
+        centro = np.rint(k * f0 / df).astype(int)
+        cand = np.clip(centro[:, None] + offsets[None, :], 1, nb - 2)
+        mejor = cand[np.arange(n), np.argmax(mag[filas, cand], axis=1)]
+        _, H[:, k - 1] = _pico_parabolico(mag, mejor)
+    return H
+
+
+def _estadisticos_espectrales(mag: np.ndarray, freqs: np.ndarray) -> np.ndarray:
+    """centroide, dispersión, rolloff85, rolloff95, planitud, entropía (excluye DC)."""
+    m = mag[:, 1:].astype(np.float64)
+    f = freqs[1:].astype(np.float64)
+    p = m ** 2
+    ptot = p.sum(axis=1, keepdims=True) + _EPS
+    pn = p / ptot
+    centroide = (pn * f).sum(axis=1)
+    dispersion = np.sqrt((pn * (f - centroide[:, None]) ** 2).sum(axis=1))
+    acum = np.cumsum(pn, axis=1)
+    r85 = f[np.argmax(acum >= 0.85, axis=1)]
+    r95 = f[np.argmax(acum >= 0.95, axis=1)]
+    planitud = np.exp(np.log(m + _EPS).mean(axis=1)) / (m.mean(axis=1) + _EPS)
+    entropia = -(pn * np.log(pn + _EPS)).sum(axis=1) / np.log(pn.shape[1])
+    return np.column_stack([centroide, dispersion, r85, r95, planitud, entropia])
+
+
+def _bandas(mag: np.ndarray, freqs: np.ndarray, bordes: tuple) -> np.ndarray:
+    p = mag[:, 1:].astype(np.float64) ** 2
+    f = freqs[1:]
+    ptot = p.sum(axis=1) + _EPS
+    return np.column_stack([p[:, (f >= lo) & (f < hi)].sum(axis=1) / ptot
+                            for lo, hi in zip(bordes[:-1], bordes[1:])])
+
+
+def _tiempo(V: np.ndarray, escala: np.ndarray) -> np.ndarray:
+    """rms_A, pico_A, cresta, zcr, curtosis, asimetria."""
+    rms = np.sqrt(np.mean(V ** 2, axis=1))
+    pico = np.abs(V).max(axis=1)
+    cresta = pico / (rms + _EPS)
+    zcr = (np.diff(np.signbit(V), axis=1) != 0).mean(axis=1)
+    curt = stats.kurtosis(V, axis=1, fisher=True)
+    asim = stats.skew(V, axis=1)
+    return np.column_stack([rms * escala, pico * escala, cresta, zcr, curt, asim])
+
+
+def nombres_features(cfg: Config) -> list:
+    nombres = ["rms_A", "pico_A"]
+    if cfg.estrategia == "rawfft":
+        for f in np.linspace(0.0, cfg.rawfft_fmax, cfg.rawfft_bins):
+            nombres.append(f"fft_{f:.1f}Hz")
+        return nombres
+    nombres += ["cresta", "zcr", "curtosis", "asimetria", "h1_A"]
+    suf = "_rel" if cfg.normalizar_forma else "_A"
+    nombres += [f"h{k}{suf}" for k in range(2, cfg.n_armonicas + 1)]
+    nombres += ["thd", "par_impar", "frac_armonica",
+                "centroide_hz", "dispersion_hz", "rolloff85_hz", "rolloff95_hz",
+                "planitud", "entropia"]
+    nombres += [f"banda_{lo:.0f}_{hi:.0f}" for lo, hi in zip(cfg.bandas_hz[:-1], cfg.bandas_hz[1:])]
+    return nombres
+
+
+def extraer_features(V: np.ndarray, escala: np.ndarray, cfg: Config, fs: float,
+                     ) -> tuple[np.ndarray, list]:
+    """(n, W) ventanas preprocesadas + escala (n,) -> (F (n, n_feats) float32, nombres)."""
+    V = np.asarray(V, dtype=np.float32)
+    escala = np.asarray(escala, dtype=np.float64)
+    if V.ndim != 2 or escala.shape != (V.shape[0],):
+        raise ValueError(f"shapes incompatibles: V {V.shape}, escala {escala.shape}")
+    mag, freqs = espectro(V, cfg, fs)
+    tiempo = _tiempo(V, escala)
+    nombres = nombres_features(cfg)
+
+    if cfg.estrategia == "rawfft":
+        grilla = np.linspace(0.0, cfg.rawfft_fmax, cfg.rawfft_bins)
+        mag_abs = mag * escala[:, None]
+        raw = np.stack([np.interp(grilla, freqs, m) for m in mag_abs])
+        F = np.column_stack([tiempo[:, :2], raw])
+        return F.astype(np.float32), nombres
+
+    f0 = estimar_f0(mag, freqs, cfg.f_red) if cfg.f0_estimar \
+        else np.full(V.shape[0], cfg.f_red, dtype=np.float32)
+    H = armonicas(mag, freqs, f0, cfg.n_armonicas, cfg.armonica_tol_bins).astype(np.float64)
+    h1 = H[:, 0]
+    h1_abs = h1 * escala
+    resto = H[:, 1:]
+    forma = resto / (h1[:, None] + _EPS) if cfg.normalizar_forma else resto * escala[:, None]
+    thd = np.sqrt((resto ** 2).sum(axis=1)) / (h1 + _EPS)
+    pares = H[:, 1::2].sum(axis=1)          # k = 2, 4, 6, ...
+    impares = H[:, 2::2].sum(axis=1)        # k = 3, 5, 7, ...
+    par_impar = pares / (impares + _EPS)
+    ptot = (mag[:, 1:].astype(np.float64) ** 2).sum(axis=1) + _EPS
+    frac_arm = np.clip((H ** 2).sum(axis=1) / ptot, 0.0, 1.0)
+
+    F = np.column_stack([
+        tiempo, h1_abs, forma, thd, par_impar, frac_arm,
+        _estadisticos_espectrales(mag, freqs),
+        _bandas(mag, freqs, cfg.bandas_hz),
+    ])
+    assert F.shape[1] == len(nombres), (F.shape, len(nombres))
+    return F.astype(np.float32), nombres
