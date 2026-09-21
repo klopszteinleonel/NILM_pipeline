@@ -13,9 +13,11 @@ Código y datos viven en dos repos privados:
 - `github.com/klopszteinleonel/NILM_local_dataset` — capturas JSON, una carpeta
   por clase, más `combinadas/` y `nada/`.
 
-1. En Colab, crear un *secret* `GITHUB_TOKEN` (ícono de la llave en la barra
-   lateral) con un token de GitHub con permiso de lectura sobre ambos repos, y
-   habilitarlo para el notebook.
+1. Crear un token de GitHub *fine-grained* (Settings → Developer settings →
+   Personal access tokens → Fine-grained): acceso solo a `NILM_pipeline` y
+   `NILM_local_dataset`, permiso **Contents: Read-only** (Metadata se marca
+   solo), nada más. En Colab guardarlo como *secret* `GITHUB_TOKEN` (ícono de
+   la llave en la barra lateral) y activar "Acceso del cuaderno".
 2. Abrir `notebooks/nilm_colab.ipynb` (desde GitHub: *Archivo → Abrir → GitHub*)
    y ejecutar las celdas en orden. La celda 0 clona los dos repos en `/content/`
    (o hace `git pull` si ya están), instala `requirements-colab.txt` e importa el paquete.
