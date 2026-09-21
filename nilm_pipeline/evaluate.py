@@ -83,6 +83,34 @@ def umbrales_optimos(Y: np.ndarray, P: np.ndarray, grilla=None) -> np.ndarray:
     return out
 
 
+def umbrales_optimos_exact(Y: np.ndarray, P: np.ndarray, grilla=None, max_iter: int = 10) -> np.ndarray:
+    """Umbrales por clase que maximizan el EXACT MATCH (todos los bits bien),
+    por descenso coordenado: arranca de los umbrales óptimos por F1 y mueve
+    una clase por vez sobre la grilla, aceptando solo mejoras estrictas.
+    El exact es una métrica escalonada (1/n) con muchos empates: por eso el
+    punto de partida y la aceptación estricta, para no vagar entre empates."""
+    Y = np.asarray(Y, dtype=np.uint8)
+    P = np.asarray(P)
+    grilla = np.arange(0.3, 0.91, 0.05) if grilla is None else np.asarray(grilla)
+    u = umbrales_optimos(Y, P, grilla)
+    exact = lambda umb: float(((P >= umb).astype(np.uint8) == Y).all(axis=1).mean())
+    mejor = exact(u)
+    for _ in range(max_iter):
+        mejoro = False
+        for j in range(Y.shape[1]):
+            if Y[:, j].sum() == 0:
+                continue
+            cand = u.copy()
+            for g in grilla:
+                cand[j] = g
+                v = exact(cand)
+                if v > mejor + 1e-12:
+                    mejor, u[j], mejoro = v, g, True
+        if not mejoro:
+            break
+    return u
+
+
 def importancias(modelo, nombres: list) -> dict:
     """Importancia media (MDI) por feature; soporta OvR de árboles y RF nativo."""
     ests = getattr(modelo, "estimators_", None)

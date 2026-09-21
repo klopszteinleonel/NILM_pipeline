@@ -45,7 +45,8 @@ from sklearn.svm import SVC
 from .augment import aumentar_ventanas, copias_por_ventana
 from .config import Config
 from .data import TIPO_COMBINADA, Dataset
-from .evaluate import agregar_por_grupo, importancias, metricas_multilabel, umbrales_optimos
+from .evaluate import (agregar_por_grupo, importancias, metricas_multilabel, umbrales_optimos,
+                       umbrales_optimos_exact)
 from .features import extraer_features, nombres_features
 from .mix import sintetizar_combinadas
 from .preprocess import preprocesar_captura, preprocesar_ventanas
@@ -288,7 +289,8 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 
     met = {}
     Pg_ind, Yg_ind, _ = agregar_por_grupo(bl["ind"]["P"], bl["ind"]["Y"], bl["ind"]["grupos"])
-    umbrales = umbrales_optimos(Yg_ind, Pg_ind)
+    umbrales = (umbrales_optimos_exact(Yg_ind, Pg_ind) if cfg.umbral_criterio == "exact"
+                else umbrales_optimos(Yg_ind, Pg_ind))
     for b, d in bl.items():
         met.update(metricas_multilabel(d["Y"], d["P"], cfg.umbral, clases, f"{b}_v_"))
         Pg, Yg, _ = agregar_por_grupo(d["P"], d["Y"], d["grupos"])

@@ -226,6 +226,27 @@ variantes de fase (jitter ±14.4°, aleatoria) y mix400 suben combinadas
 de mezclas en train; las diferencias son de 2–5 capturas de 59 (ruido).
 Las mezclas sintéticas siguen siendo imprescindibles (sin_mix → exact 0.02).
 
+Modelos (misma base, todas / comb F1-micro / comb exact / nodos):
+rf50x12 0.911/0.861/0.49/38k · hgb 0.907/0.872/0.53/— (40 min, inviable) ·
+rf20xinf 0.905/0.851/0.47/18k · base rf20x8 0.905/0.871/0.51/10k · et50x12
+0.904/0.830/0.46/87k · rf100x10 0.904/0.861/0.49/67k · rf40x8 0.901/0.866 ·
+knn 0.822/0.680/0.10 · rf_nativo 0.814/0.757/0.20 · svm 0.784 · logreg 0.762.
+umbral_exact = base en todo salvo +umbr (0.936 vs 0.940): no aporta.
+Lecturas: ningún modelo más grande supera a rf20x8 en combinadas; los RF
+grandes suben individuales (0.95) pero no mezclas; kNN/SVM/logreg quedan lejos;
+el RF multi-output nativo es claramente peor que OvR. El cuello de botella no
+es la capacidad del modelo sino la información (heladera 0.09 A, luces bajo aire).
+
+Filtros y augment (misma base; todas / comb F1-micro / comb exact):
+hp20 0.905/0.871/0.51 (= base) · notch50 (Q30, Q10, filtfilt) 0.855–0.859/
+0.755–0.766/0.22 → quitar la fundamental HUNDE combinadas: la amplitud de la
+fundamental es la información principal (resistivas, aire 2.5 vs 6 A); las
+armónicas solas no alcanzan. Augment (aug_n=2, ×2.5–3 nodos): escala10
+0.890/0.866/0.51 · hum 0.890/0.846/0.46 · blanco/blanco10/rosa/impulsivo
+0.869–0.875/0.82–0.83/0.39–0.44 · jitter_red 0.865/0.805 · todo 0.854/0.781/0.36.
+Ningún augment supera a la base; ruido de cualquier color perjudica; el
+augment solo tiene sentido para robustez a ruido futuro, no para F1.
+
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:
   `--categoria "aire,tele"` (archivo `<ts>_aire+tele.json`, la coma se guarda

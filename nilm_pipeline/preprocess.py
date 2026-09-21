@@ -25,7 +25,10 @@ def disenar_filtro(cfg: Config, fs: float) -> np.ndarray | None:
     if cfg.filtro is None:
         return None
     if cfg.filtro == "notch":
-        b, a = signal.iirnotch(cfg.filtro_fc[0], Q=30.0, fs=fs)
+        # Elimina una componente puntual (ej. la fundamental de 50 Hz para que el
+        # modelo vea solo armónicas). Ancho -3 dB = fc/Q. Causal: transitorio de
+        # ~Q/(pi*fc) s al inicio de la captura (0.19 s con Q=30).
+        b, a = signal.iirnotch(cfg.filtro_fc[0], Q=cfg.notch_q, fs=fs)
         return signal.tf2sos(b, a)
     btype = {"hp": "highpass", "lp": "lowpass", "bp": "bandpass"}[cfg.filtro]
     fc = cfg.filtro_fc[0] if cfg.filtro != "bp" else list(cfg.filtro_fc)

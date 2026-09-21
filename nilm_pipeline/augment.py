@@ -2,7 +2,11 @@
 Data augmentation sobre ventanas (n, W). SOLO para el conjunto de train.
 
 Transformaciones (todas configurables en Config):
-  - ruido gaussiano con SNR uniforme en `snr_db`
+  - ruido con SNR uniforme en `snr_db`, de tipo `ruido_tipo`:
+      blanco    gaussiano plano
+      rosa      1/f (electrónica, fuentes conmutadas): mismo SNR, energía en bajas frecuencias
+      impulsivo picos esporádicos (conmutaciones, chispas): ~0.5 % de las muestras,
+                amplitud escalada para el SNR pedido
   - escalado de amplitud uniforme en `escala` (±5 %: más borra la diferencia
     entre cargas resistivas, que solo se distinguen por amplitud)
   - shift circular aleatorio (fase de red aleatoria)
@@ -42,6 +46,24 @@ def copias_por_ventana(Yw: np.ndarray, cfg: Config) -> np.ndarray:
     return np.clip(np.rint(cfg.aug_n * factor), 0, tope).astype(np.int64)
 
 
+def _ruido(tipo: str, W: int, sigma: float, rng: np.random.Generator) -> np.ndarray:
+    """Ruido de potencia sigma^2 (RMS = sigma) del tipo pedido."""
+    if tipo == "blanco":
+        return rng.normal(0.0, sigma, W).astype(np.float32)
+    if tipo == "rosa":
+        X = np.fft.rfft(rng.normal(0.0, 1.0, W))
+        f = np.arange(len(X), dtype=np.float64); f[0] = 1.0
+        r = np.fft.irfft(X / np.sqrt(f), n=W)
+        return (r * sigma / (np.sqrt(np.mean(r ** 2)) + 1e-12)).astype(np.float32)
+    if tipo == "impulsivo":
+        r = np.zeros(W, dtype=np.float32)
+        n_imp = max(1, int(round(0.005 * W)))
+        pos = rng.choice(W, n_imp, replace=False)
+        r[pos] = rng.choice([-1.0, 1.0], n_imp) * rng.uniform(0.5, 1.5, n_imp)
+        return r * sigma / (np.sqrt(np.mean(r ** 2)) + 1e-12)
+    raise ValueError(tipo)
+
+
 def _jitter(v: np.ndarray, factor: float) -> np.ndarray:
     """Re-muestreo circular: v'(i) = v(i·factor mod W) (interpolación lineal)."""
     W = len(v)
@@ -66,7 +88,7 @@ def aumentar_ventana(v: np.ndarray, cfg: Config, rng: np.random.Generator, fs: f
         v = v + np.float32(cfg.hum_rel * rms * np.sqrt(2)) * np.sin(2 * np.pi * cfg.f_red * t + fase).astype(np.float32)
     snr = rng.uniform(*cfg.snr_db)
     sigma = rms / (10.0 ** (snr / 20.0))
-    v = v + rng.normal(0.0, sigma, W).astype(np.float32)
+    v = v + _ruido(cfg.ruido_tipo, W, sigma, rng)
     return v.astype(np.float32)
 
 

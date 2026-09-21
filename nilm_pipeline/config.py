@@ -56,6 +56,7 @@ class Config:
                                     # mantener fc << f_red: con fc=40 y orden 4 la
                                     # fundamental de 50 Hz pierde 7.5 % (15 % filtfilt)
     filtro_orden: int = 4
+    notch_q: float = 30.0           # factor de calidad del notch: ancho = fc/Q (50/30 = 1.7 Hz)
     causal: bool = False            # True = sosfilt (implementable en el borde);
                                     # False = sosfiltfilt (offline, fase cero)
     normalizar: str | None = None   # None | "rms" | "maxabs" (por ventana; las
@@ -86,7 +87,8 @@ class Config:
                                     # individuales y mezclas; las mezclas ya aportan variación)
     aug_balance: bool = True        # nivelar clases (más copias a minorías)
     aug_max_factor: int = 10        # tope de copias = aug_n * aug_max_factor
-    snr_db: tuple = (20.0, 50.0)    # rango de SNR para ruido gaussiano
+    snr_db: tuple = (20.0, 50.0)    # rango de SNR del ruido agregado
+    ruido_tipo: str = "blanco"      # "blanco" (gaussiano) | "rosa" (1/f) | "impulsivo" (picos)
     escala: tuple = (0.95, 1.05)    # rango de escalado de amplitud (±5 % ~ red)
     shift: bool = True              # desplazamiento temporal circular
     hum50: bool = False             # inyectar zumbido de f_red
@@ -117,7 +119,10 @@ class Config:
     max_depth: int | None = 8       # (3.2 MB) sobre 61 capturas; ver AGENTS.md
     hiperparams: dict = field(default_factory=dict)  # extras para el estimador
     class_weight: str | None = "balanced"
-    umbral: float = 0.5             # umbral de decisión multi-label
+    umbral: float = 0.5             # umbral de decisión multi-label (filas "por captura")
+    umbral_criterio: str = "f1"     # cómo se eligen los umbrales por clase (+umbr):
+                                    # "f1" = cada clase maximiza su F1 (independiente)
+                                    # "exact" = búsqueda conjunta que maximiza el exact match
 
     # ---------------- evaluación ----------------
     cv: str = "sgkf5"               # "sgkf5" | "logo"
@@ -152,6 +157,8 @@ class Config:
             e.append(f"multi_salida={self.multi_salida!r} no está en {MULTI_SALIDAS}")
         if self.normalizar not in NORMALIZACIONES:
             e.append(f"normalizar={self.normalizar!r} no está en {NORMALIZACIONES}")
+        if self.umbral_criterio not in ("f1", "exact"):
+            e.append("umbral_criterio debe ser 'f1' o 'exact'")
         if self.cv not in CVS:
             e.append(f"cv={self.cv!r} no está en {CVS}")
         if self.filtro not in FILTROS:
@@ -170,6 +177,10 @@ class Config:
             e.append("aug_n >= 0 y aug_max_factor >= 1")
         if not (self.snr_db[0] <= self.snr_db[1]):
             e.append("snr_db debe ser (min, max)")
+        if self.ruido_tipo not in ("blanco", "rosa", "impulsivo"):
+            e.append("ruido_tipo debe ser blanco, rosa o impulsivo")
+        if self.notch_q <= 0:
+            e.append("notch_q debe ser > 0")
         if e:
             raise ValueError("Config inválida:\n  - " + "\n  - ".join(e))
 
@@ -208,13 +219,17 @@ class Config:
     def nombre(self) -> str:
         """Nombre corto del experimento (para leaderboard y logs)."""
         mix = f"_mix{self.mix_total}" if self.mix_habilitado else ""
-        aug = f"_aug{self.aug_n}" if self.aug_n > 0 else ""
-        fil = f"_f{self.filtro}" if self.filtro else ""
+        aug = (f"_aug{self.aug_n}{self.ruido_tipo[0]}{self.snr_db[0]:g}-{self.snr_db[1]:g}"
+               + ("h" if self.hum50 else "") + ("j" if self.jitter_red else "")) if self.aug_n > 0 else ""
+        fil = f"_f{self.filtro}{self.filtro_fc[0]:g}" if self.filtro else ""
         agr = f"_agr{len(set(self.agrupar.values()))}" if self.agrupar else ""
         est = f"{self.estrategia}{self.rawfft_fmax:.0f}" if self.estrategia == "rawfft" else self.estrategia
         arb = f"{self.n_estimators}x{self.max_depth if self.max_depth is not None else 'inf'}"
-        fase = "_fasealeat" if self.mix_fase == "aleatoria" else ""
-        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{mix}{fase}{aug}{fil}{agr}"
+        fase = "_fasealeat" if self.mix_fase == "aleatoria" else (
+            f"_jit{self.mix_jitter_fase:g}" if self.mix_jitter_fase > 0 else "")
+        ms = "_nativo" if self.multi_salida == "nativo" else ""
+        uc = "_uexact" if self.umbral_criterio == "exact" else ""
+        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{ms}{mix}{fase}{aug}{fil}{agr}{uc}"
 
 
 # Preset de referencia (baseline del plan)
