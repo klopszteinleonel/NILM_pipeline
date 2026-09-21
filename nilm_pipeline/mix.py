@@ -2,7 +2,17 @@
 Síntesis de señales combinadas (varias cargas a la vez) a partir de capturas
 individuales. Las corrientes de cargas en paralelo se suman (superposición
 sobre la misma red), así que la mezcla es una suma en el dominio del tiempo
-con fase relativa (shift circular) y escala aleatorias por carga.
+con escala aleatoria (±5 %) por carga.
+
+Fase (`mix_fase`): cada captura individual arranca en una fase de red
+arbitraria, pero en la realidad todas las cargas cuelgan de la misma tensión
+y sus fundamentales están casi en fase (resistivas: 0°; motores: 20–40° de
+atraso). Con "alineada" se rota cada carga para que su fundamental de f_red
+quede en fase 0 y se aplica un jitter de ±mix_jitter_fase grados: las
+amplitudes resultantes caen cerca de la suma lineal, como en las combinadas
+reales medidas (aire+horno real 8.3–8.6 A vs 8.27 lineal / 6.2 cuadrática).
+Con "aleatoria" (comportamiento anterior) el shift es uniforme y la amplitud
+cae en cualquier punto entre la suma cuadrática y la lineal.
 
 Anti-leakage: esta función NO sabe de splits. El llamador le pasa solo las
 capturas de train (o solo las de test) del fold, y las mezclas resultantes
@@ -41,16 +51,34 @@ def rms_por_clase(senales: list, Y: np.ndarray, clases: list) -> dict[str, float
     return out
 
 
-def combinar(senales_sel: list, rng: np.random.Generator, mix_escala: tuple,
+def fase_fundamental(x: np.ndarray, fs: float, f_red: float) -> float:
+    """Fase [rad] de la componente de f_red al inicio de la señal (DFT en f_red)."""
+    n = np.arange(len(x))
+    return float(np.angle(np.sum(x * np.exp(-2j * np.pi * f_red * n / fs))))
+
+
+def alinear_fase(x: np.ndarray, fs: float, f_red: float, fase_objetivo: float = 0.0) -> np.ndarray:
+    """Rota circularmente x para que su fundamental de f_red tenga la fase pedida."""
+    d = (fase_objetivo - fase_fundamental(x, fs, f_red)) * fs / (2 * np.pi * f_red)
+    return np.roll(x, -int(round(d)))
+
+
+def combinar(senales_sel: list, rng: np.random.Generator, mix_escala: tuple, fs: float,
+             f_red: float = 50.0, modo: str = "alineada", jitter_grados: float = 30.0,
              shift: bool = True) -> np.ndarray:
-    """Suma en tiempo de varias señales con shift circular y escala aleatorios.
+    """Suma en tiempo de varias señales con escala aleatoria por carga.
+    modo="alineada": fundamentales en fase 0 ± jitter; "aleatoria": shift uniforme.
     Se recortan a la longitud mínima común."""
     n = min(len(s) for s in senales_sel)
     out = np.zeros(n, dtype=np.float32)
     for s in senales_sel:
         s = np.asarray(s[:n], dtype=np.float32)
         if shift:
-            s = np.roll(s, int(rng.integers(0, n)))
+            if modo == "alineada":
+                objetivo = np.deg2rad(rng.uniform(-jitter_grados, jitter_grados))
+                s = alinear_fase(s, fs, f_red, objetivo)
+            else:
+                s = np.roll(s, int(rng.integers(0, n)))
         out += s * np.float32(rng.uniform(*mix_escala))
     return out
 
@@ -66,7 +94,7 @@ def _tercios(rms: dict) -> tuple[list, list]:
 
 def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list,
                           cfg: Config, rng: np.random.Generator, total: int,
-                          prefijo: str = "mix") -> Mezclas:
+                          prefijo: str = "mix", fs: float = 10000.0) -> Mezclas:
     """Genera `total` mezclas de K ∈ mix_k cargas desde capturas individuales.
 
     - Solo usa capturas con exactamente una clase activa como fuente de cargas.
@@ -108,7 +136,8 @@ def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clas
         if len(fondos) and rng.random() < cfg.mix_prob_fondo:
             idx.append(int(rng.choice(fondos)))
 
-        out_senales.append(combinar([senales[j] for j in idx], rng, cfg.mix_escala))
+        out_senales.append(combinar([senales[j] for j in idx], rng, cfg.mix_escala, fs,
+                                    cfg.f_red, cfg.mix_fase, cfg.mix_jitter_fase))
         out_y.append(np.bitwise_or.reduce(Y[idx], axis=0))
         out_grupos.append(f"{prefijo}_{i:04d}")
         out_orig.append(tuple(str(grupos[j]) for j in idx))

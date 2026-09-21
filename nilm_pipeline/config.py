@@ -39,6 +39,9 @@ def _es_potencia_de_2(n: int) -> bool:
 class Config:
     # ---------------- datos ----------------
     data_dir: str = ""              # carpeta raíz de capturas (capturas_limpio)
+    agrupar: dict = field(default_factory=dict)  # clase -> grupo, ej. {"calefon": "resistiva",
+                                    # "horno": "resistiva"}: clases físicamente indistinguibles
+                                    # (misma amplitud, THD ~0) se evalúan y exportan como una
     min_capturas_aviso: int = 3     # avisa si una clase tiene menos capturas
     f_red: float = 50.0             # frecuencia de red [Hz]
     clase_nada: str = "nada"        # categoria reservada para "sin carga" → vector cero
@@ -69,9 +72,14 @@ class Config:
     mix_misma_clase: bool = False   # permitir 2 cargas de la misma clase
     mix_sesgo_grande_chica: float = 0.5  # fracción de mixes que fuerzan grande+chica
     mix_prob_fondo: float = 0.5     # prob. de sumar una captura "sin carga" como fondo
+    mix_fase: str = "alineada"      # "alineada": fundamentales en fase (+ jitter) como
+                                    # cargas reales colgadas de la misma red; "aleatoria"
+    mix_jitter_fase: float = 30.0   # grados de jitter alrededor de la alineación
 
     # ---------------- augmentación (solo train) ----------------
-    aug_n: int = 4                  # copias aumentadas por ventana
+    aug_n: int = 0                  # copias aumentadas por ventana (0 = sin augment:
+                                    # en dos datasets distintos el augment empeoró
+                                    # individuales y mezclas; las mezclas ya aportan variación)
     aug_balance: bool = True        # nivelar clases (más copias a minorías)
     aug_max_factor: int = 10        # tope de copias = aug_n * aug_max_factor
     snr_db: tuple = (20.0, 50.0)    # rango de SNR para ruido gaussiano
@@ -83,7 +91,7 @@ class Config:
     jitter_hz: float = 0.5
 
     # ---------------- features ----------------
-    estrategia: str = "compact"     # "compact" | "rawfft"
+    estrategia: str = "rawfft"      # "rawfft" (base) | "compact"
     ventana: str = "hann"           # hann|hamming|blackman|flattop|rect
     n_fft: int | None = None        # None → = W (si > W, zero-padding); potencia de 2
     n_armonicas: int = 20           # armónicas de f_red en estrategia compact
@@ -92,8 +100,9 @@ class Config:
     normalizar_forma: bool = True   # vector armónico como H_k/H1 (las absolutas quedan)
     bandas_hz: tuple = (0.0, 100.0, 300.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0)
                                     # bordes de bandas para energía fraccional
-    rawfft_fmax: float = 2000.0     # Hz máximos en estrategia rawfft
-    rawfft_bins: int = 410          # dimensión fija (re-muestreo) de rawfft
+    rawfft_fmax: float = 2000.0     # rawfft = bins directos de la FFT (sin DC) hasta esta
+                                    # frecuencia + rms/pico absolutos. Con W=2048 y fs=10 kHz:
+                                    # 409 bins de 4.88 Hz. Es exactamente lo que calcula el borde.
 
     # ---------------- modelo ----------------
     modelo: str = "rf"              # rf|et|hgb|svm|knn|logreg
@@ -124,6 +133,10 @@ class Config:
             e.append("mix_sesgo_grande_chica debe estar en [0, 1]")
         if not (0.0 <= self.mix_prob_fondo <= 1.0):
             e.append("mix_prob_fondo debe estar en [0, 1]")
+        if self.mix_fase not in ("alineada", "aleatoria"):
+            e.append("mix_fase debe ser 'alineada' o 'aleatoria'")
+        if self.rawfft_fmax <= 0:
+            e.append("rawfft_fmax debe ser > 0")
         if self.estrategia not in ESTRATEGIAS:
             e.append(f"estrategia={self.estrategia!r} no está en {ESTRATEGIAS}")
         if self.ventana not in VENTANAS:
@@ -192,7 +205,11 @@ class Config:
         mix = f"_mix{self.mix_total}" if self.mix_habilitado else ""
         aug = f"_aug{self.aug_n}" if self.aug_n > 0 else ""
         fil = f"_f{self.filtro}" if self.filtro else ""
-        return f"{self.estrategia}_W{self.W}_{self.ventana}_{self.modelo}{mix}{aug}{fil}"
+        agr = f"_agr{len(set(self.agrupar.values()))}" if self.agrupar else ""
+        est = f"{self.estrategia}{self.rawfft_fmax:.0f}" if self.estrategia == "rawfft" else self.estrategia
+        arb = f"{self.n_estimators}x{self.max_depth if self.max_depth is not None else 'inf'}"
+        fase = "_fasealeat" if self.mix_fase == "aleatoria" else ""
+        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{mix}{fase}{aug}{fil}{agr}"
 
 
 # Preset de referencia (baseline del plan)

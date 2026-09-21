@@ -43,7 +43,7 @@ from sklearn.svm import SVC
 from .augment import aumentar_ventanas, copias_por_ventana
 from .config import Config
 from .data import TIPO_COMBINADA, Dataset
-from .evaluate import agregar_por_grupo, importancias, metricas_multilabel
+from .evaluate import agregar_por_grupo, importancias, metricas_multilabel, umbrales_optimos
 from .features import extraer_features, nombres_features
 from .mix import sintetizar_combinadas
 from .preprocess import preprocesar_captura, preprocesar_ventanas
@@ -126,7 +126,7 @@ def armar_conjunto(senales: list, Y: np.ndarray, grupos: np.ndarray, cfg: Config
     Devuelve (F, Yw, Gw, nombres)."""
     senales = [preprocesar_captura(x, fs, cfg) for x in senales]
     X, Yw, Gw, _ = segmentar_dataset(senales, Y, grupos, cfg)
-    nombres = nombres_features(cfg)
+    nombres = nombres_features(cfg, fs)
     if len(X) == 0:
         return (np.empty((0, len(nombres)), np.float32),
                 np.empty((0, np.asarray(Y).shape[1]), np.uint8), Gw, nombres)
@@ -151,14 +151,14 @@ def armar_conjunto_train(senales: list, Y: np.ndarray, grupos: np.ndarray, cfg: 
 
 
 def mezclas_de(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list, cfg: Config,
-               rng: np.random.Generator, total: int, prefijo: str):
+               rng: np.random.Generator, total: int, prefijo: str, fs: float):
     """Mixes sintéticos desde un subconjunto de capturas, o None si no hay
     al menos 2 clases con individuales."""
     Yi = np.asarray(Y)
     individuales = Yi[Yi.sum(axis=1) == 1]
     if total <= 0 or len(np.unique(individuales.argmax(axis=1))) < 2:
         return None
-    return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo)
+    return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo, fs)
 
 
 # -------------------------------------------------------------------- CV ----
@@ -189,6 +189,8 @@ class Resultado:
     bloques: dict = field(default_factory=dict)   # nombre -> dict(P, Y, grupos)
     importancias: dict = field(default_factory=dict)
     segundos: float = 0.0
+    umbrales: np.ndarray | None = None            # por clase, óptimos sobre ind OOF
+    etiqueta: str = ""                            # nombre libre del experimento
 
 
 def _bloque_vacio() -> dict:
@@ -206,10 +208,11 @@ def _cerrar(bloque: dict) -> dict:
 
 
 def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = None,
-                   verbose: bool = True) -> Resultado:
+                   verbose: bool = True, etiqueta: str = "") -> Resultado:
     """Validación cruzada completa según cfg. Devuelve métricas por bloque
     (ind/mix/real) a nivel ventana (_v_) y captura (_c_), y costo del modelo."""
     t0 = time.time()
+    ds = ds.agrupar_clases(cfg.agrupar)
     fs = ds.fs()
     clases = ds.clases
     C = len(clases)
@@ -220,7 +223,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 
     bloques = {b: _bloque_vacio() for b in ("ind", "mix")}
     P_real_acum, F_real = None, None
-    nombres, imps, costo = nombres_features(cfg), [], {}
+    nombres, imps, costo = nombres_features(cfg, fs), [], {}
 
     folds = list(dividir(Y, G, cfg))
     for k, (tr, te) in enumerate(folds):
@@ -230,7 +233,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 
         # --- train: individuales + mixes, con augment
         m = mezclas_de(sen_tr, Y_tr, G_tr, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0,
-                       f"mixtr{k}")
+                       f"mixtr{k}", fs)
         if m is not None:
             sen_tr, Y_tr, G_tr = sen_tr + m.senales, np.vstack([Y_tr, m.Y]), np.concatenate([G_tr, m.grupos])
         F_tr, Yw_tr, _, nombres = armar_conjunto_train(sen_tr, Y_tr, G_tr, cfg, fs, rng)
@@ -247,7 +250,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 
         # --- test: mixes sintéticos SOLO desde individuales de test
         if cfg.mix_habilitado and cfg.mix_test:
-            mt = mezclas_de(sen_te, Y_te, G_te, clases, cfg, rng, cfg.mix_test_total, f"mixte{k}")
+            mt = mezclas_de(sen_te, Y_te, G_te, clases, cfg, rng, cfg.mix_test_total, f"mixte{k}", fs)
             if mt is not None:
                 F_mt, Yw_mt, Gw_mt, _ = armar_conjunto(mt.senales, mt.Y, mt.grupos, cfg, fs)
                 _acumular(bloques["mix"], predecir_proba(modelo, F_mt, C), Yw_mt, Gw_mt)
@@ -268,12 +271,21 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
         bl["real"] = {"P": (P_real_acum / len(folds)).astype(np.float32), "Y": Yw_r, "grupos": Gw_r}
 
     met = {}
+    umbrales = None
     for b, d in bl.items():
         if len(d["Y"]) == 0:
             continue
         met.update(metricas_multilabel(d["Y"], d["P"], cfg.umbral, clases, f"{b}_v_"))
         Pg, Yg, _ = agregar_por_grupo(d["P"], d["Y"], d["grupos"])
         met.update(metricas_multilabel(Yg, Pg, cfg.umbral, clases, f"{b}_c_"))
+        if b == "ind":
+            umbrales = umbrales_optimos(Yg, Pg)
+    # bloques mix/real con los umbrales por clase aprendidos en ind (OOF): _u_
+    if umbrales is not None:
+        for b in ("mix", "real"):
+            if b in bl and len(bl[b]["Y"]):
+                Pg, Yg, _ = agregar_por_grupo(bl[b]["P"], bl[b]["Y"], bl[b]["grupos"])
+                met.update(metricas_multilabel(Yg, Pg, umbrales, clases, f"{b}_u_"))
     met.update(costo)
     met["n_features"] = len(nombres)
     met["n_folds"] = len(folds)
@@ -285,7 +297,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
             imp_media[n] = float(np.mean([i.get(n, 0.0) for i in imps]))
         imp_media = dict(sorted(imp_media.items(), key=lambda kv: -kv[1]))
 
-    res = Resultado(cfg, clases, nombres, met, bl, imp_media, met["segundos"])
+    res = Resultado(cfg, clases, nombres, met, bl, imp_media, met["segundos"], umbrales, etiqueta)
     if leaderboard is not None:
         registrar(res, leaderboard, ds.manifest_hash)
     return res
@@ -294,11 +306,12 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 def entrenar_final(ds: Dataset, cfg: Config, verbose: bool = True):
     """Entrena con TODAS las individuales (+ mixes + augment) para exportar.
     Devuelve (modelo, nombres_features, clases)."""
+    ds = ds.agrupar_clases(cfg.agrupar)
     fs = ds.fs()
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], ds.clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()
     rng = np.random.default_rng(cfg.seed)
-    m = mezclas_de(sen, Y, G, ds.clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixfin")
+    m = mezclas_de(sen, Y, G, ds.clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixfin", fs)
     if m is not None:
         sen, Y, G = sen + m.senales, np.vstack([Y, m.Y]), np.concatenate([G, m.grupos])
     F, Yw, _, nombres = armar_conjunto_train(sen, Y, G, cfg, fs, rng)
@@ -316,7 +329,7 @@ def entrenar_final(ds: Dataset, cfg: Config, verbose: bool = True):
 def registrar(res: Resultado, ruta_csv: str | Path, manifest_hash: str = "") -> None:
     """Agrega una fila (config + métricas) al leaderboard CSV."""
     import pandas as pd
-    fila = {"nombre": res.cfg.nombre(), "fecha": time.strftime("%Y-%m-%d %H:%M:%S"),
+    fila = {"etiqueta": res.etiqueta, "nombre": res.cfg.nombre(), "fecha": time.strftime("%Y-%m-%d %H:%M:%S"),
             "manifest": manifest_hash[:10], **res.metricas, "config": res.cfg.to_json()}
     ruta = Path(ruta_csv)
     ruta.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +354,7 @@ def robustez_snr(modelo, ds: Dataset, cfg: Config, snrs=(40, 30, 20, 15, 10, 5),
     """F1 micro (por captura) sobre las individuales con ruido a distintos SNR.
     Nota: usa las mismas capturas con las que puede haberse entrenado `modelo`;
     sirve para medir degradación relativa, no rendimiento absoluto."""
+    ds = ds.agrupar_clases(cfg.agrupar)
     fs = ds.fs()
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], ds.clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()

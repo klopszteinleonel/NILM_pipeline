@@ -3,12 +3,12 @@ Extracción de features por ventana. Dos estrategias intercambiables:
 
   compact  (~45 feats): tiempo + armónicas de f_red + estadísticos espectrales
                         + energía por bandas. Pensada para el ESP32-S3.
-  rawfft   : magnitud del espectro 0..rawfft_fmax re-muestreada a rawfft_bins
-             + RMS y pico absolutos. La dimensión fija permite comparar
-             modelos entre W en el leaderboard, pero los valores NO son
-             equivalentes entre W (el ancho de lóbulo cambia): cada modelo se
-             entrena y despliega con un único W. En el borde se usan los bins
-             directos de la FFT de ese W (sin interpolar).
+  rawfft   (base): magnitud de los bins directos de la FFT (sin el bin DC,
+             que se anula al quitar la media) hasta rawfft_fmax, más RMS y pico
+             absolutos. Con W=2048 a 10 kHz: 409 bins de 4.88 Hz + 2 = 411
+             features. Es exactamente lo que calcula el borde (FFT radix-2 de
+             W puntos, |X|·2/Σw), sin interpolar. La dimensión depende de W y
+             fs: cada modelo se entrena y despliega con un único W.
 
 Decisión A (amplitud absoluta): `extraer_features` recibe `escala` (factor por
 el que preprocess.py dividió cada ventana) y lo usa para expresar RMS, pico y
@@ -137,11 +137,17 @@ def _tiempo(V: np.ndarray, escala: np.ndarray) -> np.ndarray:
     return np.column_stack([rms * escala, pico * escala, cresta, zcr, curt, asim])
 
 
-def nombres_features(cfg: Config) -> list:
+def bins_rawfft(cfg: Config, fs: float) -> np.ndarray:
+    """Índices de bin de la FFT usados por rawfft: 1..k con k·fs/n_fft <= rawfft_fmax."""
+    freqs = np.fft.rfftfreq(cfg.n_fft_efectivo, d=1.0 / fs)
+    return np.where((freqs > 0) & (freqs <= cfg.rawfft_fmax))[0]
+
+
+def nombres_features(cfg: Config, fs: float = 10000.0) -> list:
     nombres = ["rms_A", "pico_A"]
     if cfg.estrategia == "rawfft":
-        for f in np.linspace(0.0, cfg.rawfft_fmax, cfg.rawfft_bins):
-            nombres.append(f"fft_{f:.1f}Hz")
+        df = fs / cfg.n_fft_efectivo
+        nombres += [f"fft_{k * df:.2f}Hz" for k in bins_rawfft(cfg, fs)]
         return nombres
     nombres += ["cresta", "zcr", "curtosis", "asimetria", "h1_A"]
     suf = "_rel" if cfg.normalizar_forma else "_A"
@@ -162,13 +168,12 @@ def extraer_features(V: np.ndarray, escala: np.ndarray, cfg: Config, fs: float,
         raise ValueError(f"shapes incompatibles: V {V.shape}, escala {escala.shape}")
     mag, freqs = espectro(V, cfg, fs)
     tiempo = _tiempo(V, escala)
-    nombres = nombres_features(cfg)
+    nombres = nombres_features(cfg, fs)
 
     if cfg.estrategia == "rawfft":
-        grilla = np.linspace(0.0, cfg.rawfft_fmax, cfg.rawfft_bins)
-        mag_abs = mag * escala[:, None]
-        raw = np.stack([np.interp(grilla, freqs, m) for m in mag_abs])
+        raw = mag[:, bins_rawfft(cfg, fs)] * escala[:, None]
         F = np.column_stack([tiempo[:, :2], raw])
+        assert F.shape[1] == len(nombres), (F.shape, len(nombres))
         return F.astype(np.float32), nombres
 
     f0 = estimar_f0(mag, freqs, cfg.f_red) if cfg.f0_estimar \

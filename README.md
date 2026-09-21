@@ -2,7 +2,8 @@
 
 Pipeline de entrenamiento y experimentación para el medidor NILM monofásico
 (ESP32-S3 + MCP3204, 10 kHz, red 50 Hz). Clasifica firmas de corriente con
-FFT + Random Forest, con salida multi-label (qué cargas están activas), y
+FFT cruda (bins de 0–2 kHz) + Random Forest, con salida multi-label (qué cargas
+están activas), y
 exporta el modelo a C con paridad exacta para correr en el borde.
 
 ## Uso en Google Colab (repos de GitHub)

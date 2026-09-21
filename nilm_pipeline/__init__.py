@@ -14,7 +14,7 @@ from .features import (ventana_fft, espectro, estimar_f0, armonicas,
                        nombres_features, extraer_features)
 
 from .evaluate import (metricas_multilabel, agregar_por_grupo, matrices_por_clase,
-                       umbrales_optimos, importancias, reporte)
+                       umbrales_optimos, importancias, reporte, reporte_combinaciones)
 from .train import (Resultado, construir_modelo, predecir_proba, costo_modelo,
                     armar_conjunto, armar_conjunto_train, dividir, run_experiment,
                     entrenar_final, registrar, cargar_leaderboard, robustez_snr)

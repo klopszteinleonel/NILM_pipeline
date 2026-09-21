@@ -60,9 +60,11 @@ def matrices_por_clase(Y: np.ndarray, P: np.ndarray, umbral) -> np.ndarray:
 
 
 def umbrales_optimos(Y: np.ndarray, P: np.ndarray, grilla=None) -> np.ndarray:
-    """Umbral por clase que maximiza F1 sobre predicciones out-of-fold. (C,)"""
+    """Umbral por clase que maximiza F1 sobre predicciones out-of-fold (C,).
+    Piso 0.3: umbrales más bajos (clases con 1–2 capturas) generan falsos
+    positivos en mezclas; medido sobre combinadas reales, 0.3 rinde mejor que 0.1."""
     Y = np.asarray(Y, dtype=np.uint8)
-    grilla = np.arange(0.1, 0.91, 0.05) if grilla is None else np.asarray(grilla)
+    grilla = np.arange(0.3, 0.91, 0.05) if grilla is None else np.asarray(grilla)
     out = np.full(Y.shape[1], 0.5)
     for j in range(Y.shape[1]):
         if Y[:, j].sum() == 0:
@@ -89,12 +91,13 @@ def reporte(metricas: dict, clases: list, bloques=("ind", "mix", "real")) -> str
     lineas = []
     cab = ("bloque", "n", "exact", "hamming", "f1_micro", "f1_macro", "prec", "rec")
     lineas.append(f"{cab[0]:14s}" + "".join(f"{c:>9s}" for c in cab[1:]))
+    etiqueta_nivel = {"v": "ventana", "c": "captura", "u": "captura+umbr"}
     for b in bloques:
-        for nivel in ("v", "c"):
+        for nivel in ("v", "c", "u"):
             p = f"{b}_{nivel}_"
             if p + "n" not in metricas:
                 continue
-            fila = (f"{b}/{'ventana' if nivel == 'v' else 'captura'}",
+            fila = (f"{b}/{etiqueta_nivel[nivel]}",
                     str(metricas[p + "n"]),
                     *(f"{metricas[p + k]:.3f}" for k in
                       ("exact_match", "hamming", "f1_micro", "f1_macro", "precision_macro", "recall_macro")))
@@ -105,4 +108,27 @@ def reporte(metricas: dict, clases: list, bloques=("ind", "mix", "real")) -> str
     costo = {k: metricas[k] for k in ("n_features", "n_arboles", "nodos_totales", "prof_max") if k in metricas}
     if costo:
         lineas.append("costo modelo: " + ", ".join(f"{k}={v}" for k, v in costo.items()))
+    return "\n".join(lineas)
+
+
+def reporte_combinaciones(bloque: dict, clases: list, umbral, max_filas: int = 40) -> str:
+    """Por cada combinación real de cargas: cuántas capturas, qué se predijo
+    (con `umbral`, escalar o por clase) y la probabilidad media por clase."""
+    from collections import Counter
+    Pg, Yg, _ = agregar_por_grupo(bloque["P"], bloque["Y"], bloque["grupos"])
+    Yp = binarizar(Pg, umbral)
+    etiqueta = lambda fila: ",".join(c for c, b in zip(clases, fila) if b) or "(nada)"
+    verdad = np.array([etiqueta(y) for y in Yg])
+    lineas = [f"{'combinación real':26s} {'n':>3s}  predicciones (umbral aplicado)"]
+    for combo in sorted(set(verdad), key=lambda c: (-int((verdad == c).sum()), c))[:max_filas]:
+        idx = np.where(verdad == combo)[0]
+        pred = Counter(etiqueta(Yp[i]) for i in idx)
+        pm = Pg[idx].mean(axis=0)
+        activas = set(combo.split(","))
+        detalle = ", ".join(f"{c}={pm[j]:.2f}" for j, c in enumerate(clases)
+                            if c in activas or pm[j] >= 0.3)
+        exact = sum(1 for i in idx if etiqueta(Yp[i]) == combo)
+        lineas.append(f"{combo:26s} {len(idx):3d}  exactas={exact}/{len(idx)}  "
+                      + "; ".join(f"{k}×{v}" for k, v in pred.most_common(4)))
+        lineas.append(f"{'':26s}      proba media: {detalle}")
     return "\n".join(lineas)

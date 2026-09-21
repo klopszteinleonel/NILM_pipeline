@@ -13,18 +13,25 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
   - `preprocess.py` — filtro IIR (sos) sobre la captura; DC/normalización por
     ventana (devuelve el factor de escala para recuperar amplitudes absolutas).
   - `segment.py` — ventanas W×solape; devuelve también `idx_captura`.
-  - `mix.py` — combinadas sintéticas (2–3 cargas) con sesgo grande+chica y
-    fondo "sin carga"; `Mezclas.origenes` para auditar anti-leakage.
+  - `mix.py` — combinadas sintéticas (2–3 cargas) con sesgo grande+chica,
+    fondo "sin carga" y **fundamentales alineadas en fase** (+ jitter ±30°),
+    como cargas reales colgadas de la misma red; `Mezclas.origenes` para
+    auditar anti-leakage. Requiere `fs`.
   - `augment.py` — sobre ventanas de train: ruido SNR, escala ±5 %, shift,
     hum, jitter de f_red; balanceo por clase con tope; hereda grupo/idx.
-  - `features.py` — `compact` (42 feats: tiempo, armónicas con f0 estimado
-    en log-parabólica y tolerancia ±1 bin, estadísticos, bandas) y `rawfft`
-    (410 bins + rms/pico). `extraer_features(V, escala, cfg, fs)`.
+  - `features.py` — `rawfft` (BASE desde 2026-09-21: bins directos de la FFT
+    sin DC hasta `rawfft_fmax`=2 kHz → 409 bins con W=2048 + rms/pico = 411
+    feats; sin interpolar, es lo que calcula el borde) y `compact` (42 feats:
+    tiempo, armónicas con f0 estimado, estadísticos, bandas).
+    `extraer_features(V, escala, cfg, fs)`, `nombres_features(cfg, fs)`.
   - `evaluate.py` — métricas multi-label por ventana y por captura
-    (`agregar_por_grupo`), umbrales por clase, importancias, `reporte`.
+    (`agregar_por_grupo`), umbrales por clase (piso 0.3), importancias,
+    `reporte`, `reporte_combinaciones` (qué se predice por combinación real).
   - `train.py` — `run_experiment(ds, cfg, leaderboard)`: CV por grupos con
-    mix dentro del fold y 3 bloques (ind/mix/real); `entrenar_final`;
-    `costo_modelo`; `robustez_snr`; leaderboard CSV (config JSON + métricas).
+    mix dentro del fold y 3 bloques (ind/mix/real); aplica `cfg.agrupar`;
+    métricas `_u_` = mix/real con umbrales por clase aprendidos en ind OOF
+    (`Resultado.umbrales`); `entrenar_final`; `costo_modelo`; `robustez_snr`;
+    leaderboard CSV (config JSON + métricas).
   - `export.py` — `exportar(modelo, cfg, fs, nombres, clases, carpeta)` genera
     `nilm_modelo.h` (bosques como arrays de nodos de 12 bytes, un bosque por
     clase, `nilm_predict_proba`/`nilm_predict`), `nilm_config.h` (#defines,
@@ -82,13 +89,27 @@ El filtro (`preprocesar_captura`) va sobre la captura completa antes de segmenta
 - Convención multi-label: `categoria="aire,tele"` (separador coma) para
   combinadas reales, guardadas en subcarpeta `combinadas/`.
 - `categoria="nada"` = captura sin carga (ruido de fondo) → etiqueta vector
-  cero, tipo `sin_carga`. NO es una clase. Pendiente: el usuario capturará ~10.
+  cero, tipo `sin_carga`. NO es una clase.
+- `Config.agrupar` (clase → grupo) fusiona clases en carga (`Dataset.agrupar_clases`).
+  Default del notebook: calefon/horno/pava/plancha → "resistiva".
 - Fuente de verdad de la clase = campo `categoria` del JSON (no la carpeta;
   ej: carpeta `hidromasaje/` pero clase `hidro`).
 - Hay capturas de 1 s (10000) y de 2 s (20000 muestras).
 - Cada captura es su propio grupo (anti-leakage en CV).
 
-## Hechos de las señales (medidos 2026-09-19)
+## Hechos de las señales (medidos 2026-09-19/21)
+- Dataset 2026-09-20: calefon 4.7/6.4 A, horno 2.8/5.6 A, aire 2.5/6.0 A,
+  pava 6.07, plancha 6.05 → **calefon/horno/pava/plancha son indistinguibles**
+  (misma amplitud, THD 0.02); en combinadas reales el modelo las confunde
+  sistemáticamente. 11 de 19 capturas de heladera están a 0.08–0.09 A (compresor
+  apagado) = igual que `parasito` → heladera es invisible en mezclas.
+  El usuario decidió NO reetiquetar ni recapturar con tensión por ahora.
+- Combinadas reales: RMS cae cerca de la suma lineal de las individuales
+  (aire+horno 8.3–8.6 A vs 8.27 lineal / 6.2 cuadrática) → cargas en fase.
+  Mezclar con fase aleatoria generaba amplitudes irreales; `mix_fase="alineada"`
+  subió real F1-micro 0.69 → 0.74.
+- Umbrales por clase: derivarlos de individuales OOF con piso 0.3 mejora `real`
+  (exact 0.46 → 0.54); derivarlos de `mix` empeora todo (falsos positivos).
 - Resistivas puras (calefon 6.4 A, plancha 6.15 A, horno 2.8 A, secadorpelo
   2.4 A) tienen THD ≈ 0.02: se distinguen SOLO por amplitud absoluta.
   Limitación conocida: dos resistivas de potencia similar son indistinguibles
@@ -127,7 +148,9 @@ El filtro (`preprocesar_captura`) va sobre la captura completa antes de segmenta
   nativo solo referencia.
 - Validación: StratifiedGroupKFold(5) estratificado por la clase de la
   individual (y 1-D); LOGO definitivo. Combinadas reales fuera de los folds.
-- Estrategias comparadas: `compact` vs `rawfft`.
+- Estrategia base `rawfft` W=2048 hasta 2 kHz (decisión del usuario 2026-09-21);
+  `compact` queda como variante. Augment desactivado por default (`aug_n=0`):
+  en 61 y en 209 capturas empeoró individuales y mezclas.
 - Export: un RF binario por clase como arrays C propios + test de paridad en
   host (gcc). Costo en flash ≈ 12 bytes/nodo: baseline 50×10 = 3.2 MB (NO
   entra cómodo), OvR 20×8 = 276 KB (OK). Elegir por leaderboard mirando
@@ -167,11 +190,22 @@ Lección del test de paridad: atrapó un `uint8_t` para el índice de feature
 - `emlearn` quedó instalado en el venv pero no se usa (requiere `setuptools`
   por `distutils` en Python ≥ 3.12).
 
-## Estado (2026-09-19)
-Pasos 1–6 hechos: paquete completo, notebook Colab (desde GitHub) ejecutado
-localmente de punta a punta, README. Default de `Config` pasó a RF 20×8.
-Repos en GitHub y dataset ampliado (2026-09-20). Pendiente: correr el notebook
-completo con el dataset nuevo y mirar el bloque `real`.
+## Estado (2026-09-21)
+Pasos 1–6 hechos; repos en GitHub; dataset 209 capturas. Base = rawfft directo,
+fase alineada, sin augment, resistivas agrupadas. Referencia local (SGKF5):
+`Config(agrupar=RES)` → ind F1-micro 0.86, mix 0.74, **real exact 0.46 /
+F1-micro 0.85** (0.54 / 0.87 con umbrales), 22 k nodos. Sin agrupar: real
+exact 0.19 / 0.74. Fallos restantes: heladera (0.09 A) invisible, luces y
+lavarropa bajo aire a medias.
+
+Barrido local 2026-09-21 sobre la base (real F1-micro / exact / nodos):
+fmax3000 0.893/0.58/23k · rf20x12 0.885/0.59/39k · W4096 0.882/0.56/16k ·
+fase_aleatoria 0.871/0.54/24k · hp20 0.865/0.54/23k · rf40x8 0.858/0.49/45k ·
+base 0.850/0.46/22k · mix800 0.809/0.34 · compact 0.780/0.37 · aug4 0.752/0.27 ·
+sin_agrupar 0.738/0.19 · fmax1000 0.708/0.03. Lecturas: las armónicas entre 2 y
+3 kHz aportan (fmax1000 hunde todo); profundidad 12 ayuda; W4096 rinde igual con
+30 % menos nodos; la fase alineada vs aleatoria queda dentro del ruido (±0.03)
+en este dataset; augment y mix800 perjudican. LOGO del mejor: ind 0.914.
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:

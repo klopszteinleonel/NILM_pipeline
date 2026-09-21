@@ -35,7 +35,7 @@ import joblib
 import numpy as np
 
 from .config import Config
-from .features import ventana_fft
+from .features import bins_rawfft, ventana_fft
 from .preprocess import disenar_filtro
 
 _HOJA = 65535
@@ -164,7 +164,8 @@ def config_pipeline(cfg: Config, fs: float, nombres: list, clases: list, umbrale
         "estrategia": cfg.estrategia, "n_armonicas": cfg.n_armonicas,
         "f0_estimar": cfg.f0_estimar, "armonica_tol_bins": cfg.armonica_tol_bins,
         "normalizar_forma": cfg.normalizar_forma, "bandas_hz": list(cfg.bandas_hz),
-        "rawfft_fmax": cfg.rawfft_fmax, "rawfft_bins": cfg.rawfft_bins,
+        "rawfft_fmax": cfg.rawfft_fmax,
+        "rawfft_bins": [int(k) for k in bins_rawfft(cfg, fs)] if cfg.estrategia == "rawfft" else [],
         "clases": list(clases), "umbrales": [float(u) for u in np.broadcast_to(umbrales, (len(clases),))],
         "n_features": len(nombres), "features": list(nombres),
         "modelo": cfg.modelo, "multi_salida": cfg.multi_salida,
@@ -184,7 +185,9 @@ def generar_config_h(pc: dict) -> str:
     d("NILM_N_ARMONICAS", pc["n_armonicas"]); d("NILM_F0_ESTIMAR", int(pc["f0_estimar"]))
     d("NILM_ARMONICA_TOL_BINS", pc["armonica_tol_bins"]); d("NILM_NORMALIZAR_FORMA", int(pc["normalizar_forma"]))
     d("NILM_ESTRATEGIA_RAWFFT", int(pc["estrategia"] == "rawfft"))
-    d("NILM_RAWFFT_FMAX", f"{pc['rawfft_fmax']!r}f"); d("NILM_RAWFFT_BINS", pc["rawfft_bins"])
+    d("NILM_RAWFFT_FMAX", f"{pc['rawfft_fmax']!r}f"); d("NILM_RAWFFT_N_BINS", len(pc["rawfft_bins"]))
+    if pc["rawfft_bins"]:
+        d("NILM_RAWFFT_BIN_INI", pc["rawfft_bins"][0]); d("NILM_RAWFFT_BIN_FIN", pc["rawfft_bins"][-1])
     d("NILM_N_BANDAS", len(pc["bandas_hz"]) - 1)
     d("NILM_N_CLASES", len(pc["clases"])); d("NILM_N_FEATURES", pc["n_features"])
     d("NILM_N_SOS", len(pc["sos"]))

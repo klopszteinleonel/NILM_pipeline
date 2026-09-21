@@ -89,6 +89,20 @@ class Dataset:
         return Dataset(regs, self.clases, self.manifest_filas,
                        self.manifest_hash, self.problemas)
 
+    def agrupar_clases(self, mapa: dict) -> "Dataset":
+        """Nuevo Dataset con clases renombradas según `mapa` (clase -> grupo).
+        Clases físicamente indistinguibles (ej. calefon/horno/pava/plancha ->
+        "resistiva") se fusionan; una captura con dos clases del mismo grupo
+        queda con una sola etiqueta. Las no mapeadas se conservan."""
+        if not mapa:
+            return self
+        regs = []
+        for r in self.registros:
+            clases = tuple(sorted({mapa.get(c, c) for c in r.clases}))
+            regs.append(Registro(r.ruta, clases, r.lugar, r.fs, r.muestras, r.tipo, r.datos, r.grupo))
+        clases = sorted({c for r in regs for c in r.clases})
+        return Dataset(regs, clases, self.manifest_filas, self.manifest_hash, self.problemas)
+
     def resumen(self, min_capturas_aviso: int = 3) -> str:
         lineas = [f"Dataset: {len(self.registros)} capturas, "
                   f"{len(self.clases)} clases, fs={self.fs():.0f} Hz, "
