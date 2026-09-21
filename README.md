@@ -5,21 +5,27 @@ Pipeline de entrenamiento y experimentación para el medidor NILM monofásico
 FFT + Random Forest, con salida multi-label (qué cargas están activas), y
 exporta el modelo a C con paridad exacta para correr en el borde.
 
-## Uso en Google Colab (Drive montado)
+## Uso en Google Colab (repos de GitHub)
 
-1. Subir a Drive esta estructura:
-   ```
-   MyDrive/NILM/
-   ├── pipeline/            # esta carpeta completa (nilm_pipeline/, notebooks/, requirements-colab.txt)
-   └── capturas_limpio/     # capturas JSON del nodo, una subcarpeta por clase
-   ```
-2. Abrir `pipeline/notebooks/nilm_colab.ipynb` en Colab y ejecutar las celdas en orden.
-   La celda 0 monta Drive, instala `requirements-colab.txt` e importa el paquete.
-3. Los resultados quedan en `pipeline/outputs/` (Drive): `manifest.csv`,
-   `cache_dataset.npz`, `leaderboard.csv` y `export_<experimento>/` con los
-   headers C.
+Código y datos viven en dos repos privados:
 
-Para cambiar las rutas, editar `RUTA_PIPELINE` / `RUTA_DATOS` en la celda 0.
+- `github.com/klopszteinleonel/NILM_pipeline` — este repo.
+- `github.com/klopszteinleonel/NILM_local_dataset` — capturas JSON, una carpeta
+  por clase, más `combinadas/` y `nada/`.
+
+1. En Colab, crear un *secret* `GITHUB_TOKEN` (ícono de la llave en la barra
+   lateral) con un token de GitHub con permiso de lectura sobre ambos repos, y
+   habilitarlo para el notebook.
+2. Abrir `notebooks/nilm_colab.ipynb` (desde GitHub: *Archivo → Abrir → GitHub*)
+   y ejecutar las celdas en orden. La celda 0 clona los dos repos en `/content/`
+   (o hace `git pull` si ya están), instala `requirements-colab.txt` e importa el paquete.
+3. Los resultados quedan en `/content/NILM_pipeline/outputs/` (`manifest.csv`,
+   `cache_dataset.npz`, `leaderboard.csv`, `export_<experimento>/`). Esa carpeta
+   es efímera: para conservar el leaderboard entre sesiones poné
+   `PERSISTIR_EN_DRIVE = True` en la celda 0 (usa `MyDrive/NILM/outputs`).
+
+Para agregar datos: subir los JSON al repo del dataset y volver a correr la
+celda 0 (hace `pull`) y la de ingesta.
 
 ## Flujo del notebook
 
@@ -68,4 +74,3 @@ cd pipeline
 El venv local (`.venv/`) tiene numpy, scipy, scikit-learn, pandas, joblib y
 matplotlib. `gcc` es necesario para `test_paridad`. Ver `AGENTS.md` para las
 decisiones de diseño, hechos medidos sobre las señales y resultados de referencia.
-# NILM_pipeline

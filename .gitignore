@@ -4,3 +4,5 @@ __pycache__/
 outputs/
 *.npz
 .ipynb_checkpoints/
+session-ses_f4f3.md
+session-ses_f784.md

@@ -50,14 +50,23 @@ El filtro (`preprocesar_captura`) va sobre la captura completa antes de segmenta
 ## Otros archivos
 - `nilm_pipeline/plots.py` — gráficos de sanity check y resultados para el notebook.
 - `notebooks/nilm_colab.ipynb` — notebook delgado (se genera/edita a mano;
-  la celda 0 detecta Colab+Drive vs local). Ejecutable localmente con el venv
+  la celda 0 clona los repos en Colab o usa rutas relativas en local). Ejecutable localmente con el venv
   desde `notebooks/` (rutas relativas).
-- `README.md` — uso en Colab con Drive montado y descripción del export.
+- `README.md` — uso en Colab desde GitHub y descripción del export.
 - `outputs/` — artefactos locales (manifest.csv, leaderboard.csv, caches). No versionar.
 - `requirements-colab.txt` — deps para Colab.
 
+## Repos (GitHub, privados, desde 2026-09-20)
+- Código: `github.com/klopszteinleonel/NILM_pipeline` (= este directorio).
+- Datos: `github.com/klopszteinleonel/NILM_local_dataset` (= clon local en
+  `../clienteTCP/capturas_limpio/`, una carpeta por clase + `combinadas/` + `nada/`).
+- Colab clona ambos con un secret `GITHUB_TOKEN`; ya no se usa Drive (opcional
+  solo para persistir `outputs/`).
+
 ## Datos
-- Carpeta de capturas: `../clienteTCP/capturas_limpio/` (fuera de este directorio).
+- Carpeta de capturas local: `../clienteTCP/capturas_limpio/` (clon del repo del dataset).
+- Estado 2026-09-20: 209 capturas, 14 clases (nuevas: lavarropa 17, parasito 11,
+  pava 7), 59 combinadas reales, 10 sin carga. hidro y secadorpelo siguen con 1.
 - Formato JSON del nodo: `{categoria, lugar, canal, magnitud, unidad, fs=10000,
   duracion, muestras, formato, k, bytes, datos[]}` (1 s típica = 10000 muestras).
   `canal=0/magnitud="corriente"/unidad="A"` (CH0) o `canal=1/"tension"/"V"` (CH1).
@@ -159,10 +168,10 @@ Lección del test de paridad: atrapó un `uint8_t` para el índice de feature
   por `distutils` en Python ≥ 3.12).
 
 ## Estado (2026-09-19)
-Pasos 1–6 hechos: paquete completo, notebook Colab (Drive montado) ejecutado
+Pasos 1–6 hechos: paquete completo, notebook Colab (desde GitHub) ejecutado
 localmente de punta a punta, README. Default de `Config` pasó a RF 20×8.
-Pendientes del usuario: subir `pipeline/` y `capturas_limpio/` a
-`MyDrive/NILM/`, capturar registros `categoria="nada"` y combinadas reales.
+Repos en GitHub y dataset ampliado (2026-09-20). Pendiente: correr el notebook
+completo con el dataset nuevo y mirar el bloque `real`.
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:
