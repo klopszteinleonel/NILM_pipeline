@@ -9,7 +9,10 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
 - `nilm_pipeline/` — paquete Python con las etapas del pipeline:
   - `config.py` — dataclass `Config`: ÚNICA fuente de verdad de parámetros
     (valida en `__post_init__`: W potencia de 2, nombres válidos, etc.).
-  - `data.py` — manifest + loader multi-label + cache .npz.
+  - `data.py` — manifest + loader multi-label + cache .npz. `asignar_sesiones`
+    deriva `sesion` (lugar_fecha_n, pausas > 20 min) y `rafaga` (misma etiqueta
+    consecutiva < 90 s = casi duplicados) del nombre de archivo; van al manifest
+    y al cache. `resumen()` muestra ráfagas y lugares por clase.
   - `preprocess.py` — filtro IIR (sos) sobre la captura; DC/normalización por
     ventana (devuelve el factor de escala para recuperar amplitudes absolutas).
   - `segment.py` — ventanas W×solape; devuelve también `idx_captura`.
@@ -27,13 +30,19 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
   - `evaluate.py` — métricas multi-label por ventana y por captura
     (`agregar_por_grupo`), umbrales por clase (piso 0.3), importancias,
     `reporte`, `reporte_combinaciones` (qué se predice por combinación real).
-  - `train.py` — `run_experiment(ds, cfg, leaderboard, etiqueta)`: CV por
-    grupos con mix dentro del fold. El test son SOLO capturas reales, en tres
-    bloques: `ind` (individuales del fold), `comb` (combinadas reales, fuera
-    de los folds, promedio de los modelos) y `todas` (ind+comb = métrica del
-    producto). `mix` solo si `mix_test=True`. Aplica `cfg.agrupar`; `_u_` =
-    umbrales por clase aprendidos en ind OOF (`Resultado.umbrales`);
-    `entrenar_final`; `costo_modelo`; `robustez_snr`; leaderboard CSV.
+  - `train.py` — `run_experiment(ds, cfg, leaderboard, etiqueta)`. Validación
+    `cfg.cv`: **"lolo" (default) = leave-one-lugar-out**: entrena sin un lugar y
+    evalúa sus individuales Y sus combinadas (casa nunca vista); "sgkf5"/"logo"
+    agrupados por `cfg.cv_grupo` ("rafaga" default; "captura" reproduce los
+    números viejos, optimistas). Bloques reales `ind` / `comb` / `todas`.
+    Niveles `_v_` ventana, `_c_` captura (umbral 0.5), `_s_` clases vistas (sin
+    contar aparatos que solo existen en la casa de test), `_u_` umbrales por
+    clase (solo comb/mix; empeoran bajo validación honesta → no usar).
+    `run_repetido(ds, cfg, n_semillas)` → media ± desvío (leaderboard guarda
+    `_std` y `n_semillas`); `comparar(a, b)` pareado por semilla;
+    `evaluar_test_congelado` sobre `cfg.test_congelado` (lugares/sesiones que
+    run_experiment ignora). `preparar_dataset` aplica agrupar, min_capturas,
+    min_rafagas y el congelado.
   - `export.py` — `exportar(modelo, cfg, fs, nombres, clases, carpeta)` genera
     `nilm_modelo.h` (bosques como arrays de nodos de 12 bytes, un bosque por
     clase, `nilm_predict_proba`/`nilm_predict`), `nilm_config.h` (#defines,
@@ -57,8 +66,10 @@ El filtro (`preprocesar_captura`) va sobre la captura completa antes de segmenta
 
 ## Otros archivos
 - `nilm_pipeline/plots.py` — gráficos de sanity check y resultados para el notebook.
-- `notebooks/nilm_colab.ipynb` — notebook delgado (se genera/edita a mano;
-  la celda 0 clona los repos en Colab o usa rutas relativas en local). Ejecutable localmente con el venv
+- `notebooks/nilm_colab.ipynb` — notebook delgado, GENERADO por
+  `tools/construir_notebook.py` (editar el constructor y regenerar:
+  `.venv/bin/python3 tools/construir_notebook.py notebooks/nilm_colab.ipynb`).
+  La celda 0 clona los repos en Colab o usa rutas relativas en local. Ejecutable localmente con el venv
   desde `notebooks/` (rutas relativas).
 - `README.md` — uso en Colab desde GitHub y descripción del export.
 - `outputs/` — artefactos locales (manifest.csv, leaderboard.csv, caches). No versionar.
@@ -246,6 +257,99 @@ armónicas solas no alcanzan. Augment (aug_n=2, ×2.5–3 nodos): escala10
 0.869–0.875/0.82–0.83/0.39–0.44 · jitter_red 0.865/0.805 · todo 0.854/0.781/0.36.
 Ningún augment supera a la base; ruido de cualquier color perjudica; el
 augment solo tiene sentido para robustez a ruido futuro, no para F1.
+
+## Revisión 2026-09-22: hechos medidos (ver informe en la conversación)
+- Dataset = 3 sesiones (S00 12-sep casa/local; S01 y S02 20-sep depaleo). Las 148
+  individuales son 28 ráfagas (misma clase, < 90 s): el tamaño efectivo es ~28, no
+  148. aireinverter, airecalor, tele, parasito y nada tienen UNA sola ráfaga.
+- CV agrupada por captura (actual) = ind exact 0.905; agrupada por ráfaga = 0.536;
+  leave-one-burst-out solo en clases con ≥2 ráfagas = exact 0.675 / F1 0.81
+  (luces 0.12: lámparas distintas en cada lugar). El CV actual es muy optimista.
+- Combinadas: todas grabadas en las mismas sesiones que sus individuales. Entrenando
+  solo con otra sesión (S00) → combinadas sin lavarropa exact 0.35 / F1 0.66
+  (vs 0.45 / 0.83 con la misma sesión en train).
+- Ruido entre semillas (misma config): comb exact 0.534 ± 0.064 (0.44–0.63),
+  comb F1 ±0.023. Casi todas las diferencias de los barridos están en el ruido.
+- Piso de ruido del front-end ≈ 83 mA RMS de banda ancha (~10 LSB, ~33× el ruido de
+  cuantización); nada/parasito/heladera-S02 tienen todas ese RMS. Fundamental:
+  nada 5 mA, parasito 24 mA, heladera S02 14 mA (reposo; las 12 combinadas de S02
+  con heladera tienen la etiqueta inobservable: re-etiquetarlas sube comb exact
+  0.51 → 0.69).
+- Fondo de escala ±17.5 A pico (≈12.4 A RMS senoidal). Las 3 aire+calefon+horno
+  están saturadas (14–16 % de muestras en el riel) y el modelo las lee como
+  lavarropa. data.py no detecta saturación.
+- Red real en los datos: 49.91–50.08 Hz. Con f0 ±0.2 Hz la base cae de exact 0.45
+  a 0.37–0.39 (comb, modelo con todas las individuales); rawfft con eje normalizado
+  a f0 estimada se mantiene en 0.46–0.50 sin costo nominal.
+- Muestreo coherente (12.8 kHz, W=2048 = 8 ciclos exactos) NO sirve: igual en
+  nominal y mucho peor ante deriva de f0 (rect: exact 0.23 → 0.04).
+- Paridad de features: FFT float32 no cambia decisiones; Hann simétrica (N−1) vs
+  periódica cambia 0.01 % (riesgo menor; usar la LUT exportada).
+- Bugs: Config.from_dict falla con filas viejas del leaderboard (campos quitados);
+  el constructor del notebook vive fuera del repo; robustez_snr es in-sample;
+  todas_u usa umbrales ajustados sobre ind (parte de todas) → optimista.
+
+## Definiciones del usuario (2026-09-22) — condicionan todo el diseño
+- OBJETIVO: el medidor debe funcionar en CASAS QUE NUNCA VIO (modelo genérico).
+  La métrica que manda es la validación entre lugares (leave-one-lugar-out), no
+  el CV dentro de una sesión.
+- aire y airecalor = el MISMO equipo en dos modos (mutuamente excluyentes);
+  aireinverter = otro equipo.
+- parasito = cargas enchufadas "apagadas" con consumo chico sostenido (ej. aire
+  en standby). Fundamental medida 24 mA (~5 W), cerca del piso de ruido.
+- Heladera de S02: el usuario cree que no estaba en reposo (14 mA de fundamental
+  ≈ 3 W; la heladera de "local" con compresor andando mide 0.28–0.51 A).
+- Hardware: TC 15 A/1 V → satura a ~12.4 A RMS; objetivo ~20 A RMS. Con el mismo
+  front-end el fondo de escala escala como 12.4·(rango/15): 20 A/1 V → 16.5 A RMS,
+  30 A/1 V → 24.7 A RMS (cuantización 4.9 mA RMS, muy debajo del piso de ruido
+  de 83 mA → cambiar de sensor casi no cuesta resolución efectiva).
+- Anti-alias: corriente = Butterworth 4° orden fc 2.2 kHz (2× MCP602); tensión =
+  LM358 + RC 1er orden fc 480 Hz. Desfase I−V calculado (filtros + ~20 µs entre
+  lecturas CH0/CH1): 2.9° a 50 Hz, 8° a 150 Hz, 12° a 250 Hz, 16° a 500 Hz (sin
+  contar el desfase propio del TC) → P/Q necesitan calibración de fase (carga
+  resistiva pura = referencia de FP 1). Bins > 2.2 kHz están atenuados
+  (−11 dB a 3 kHz). Para alinear mezclas por fase de tensión NO hace falta
+  calibrar: el desfase es común a todas las capturas del mismo hardware.
+
+## Validación honesta (implementada 2026-09-22) — referencia actual
+Base `Config(agrupar=RES)`, 5 semillas:
+- LOLO (casa nunca vista), clases vistas: ind F1 0.715±0.009, comb F1
+  0.691±0.041, comb exact 0.363±0.023, todas F1 0.703±0.017.
+- sgkf5 por ráfaga: ind (clases vistas) exact 0.675 / F1 0.78; comb exact 0.49
+  / F1 0.85. sgkf5 por captura reproduce los números viejos (0.90 / 0.51).
+- Umbrales por clase bajo validación honesta EMPEORAN comb (por ráfaga exact
+  0.49 → 0.41; LOLO 0.25 → 0.10): la mejora vieja era efecto de los casi
+  duplicados. Decisión: umbral fijo 0.5; export sin umbrales por clase.
+- Primera comparación pareada: fmax3000 > fmax2000 en 5/5 semillas (todas_s
+  +0.046±0.021). Los barridos anteriores deben re-evaluarse con este esquema.
+- Barrido LOLO 2026-09-22 (3 semillas; todas_s / comb_s F1 / comb_s exact):
+  fase_aleatoria 0.736/0.766/0.45 · aug_impulsivo 0.731/0.754/0.51 ·
+  aug_escala10 0.729/0.759/0.49 · aug_rosa 0.727/0.760/0.49 · fmax4000 0.717 ·
+  aug_hum 0.716 · aug_blanco 0.711/0.752/0.50 · base 0.703/0.691/0.36 · mix200
+  0.702 · rf50x12 0.701 · hp20 0.699 · jitter_2hz 0.683 · aug_jitter_red 0.681 ·
+  sin_mix 0.673/0.573/0.11 · W4096 0.673 · fmax2000 0.660 · notch50 0.654/0.527/
+  0.10 · compact 0.601 · sin_agrupar 0.500.
+  CAMBIO DE CONCLUSIÓN: con casa nunca vista, el augment (ruido de cualquier
+  tipo, escala ±10 %) y la fase aleatoria MEJORAN las combinadas (+0.06–0.08 F1,
+  exact 0.36 → ~0.5, con desvíos chicos). Bajo el CV por captura parecían
+  perjudicar porque ese CV premiaba memorizar casi duplicados. Ojo: comb en LOLO
+  es un solo fold (depaleo, entrenado solo con casa+local).
+
+## Dataset con depamica (2026-09-22, 317 capturas, 4 lugares, 124 combinadas)
+Base del notebook: agrupar resistivas + airecalor→aire, excluir_clases=("parasito",).
+LOLO 5 semillas: ind_s F1 0.737±0.028; comb F1 0.654±0.035, exact 0.263±0.045;
+todas_s 0.686±0.030. sgkf5 por ráfaga: ind 0.780, comb F1 0.783, exact 0.41.
+Barrido LOLO (3 semillas, todas_s): aug_hum 0.702, jitter_2hz 0.700, aug_blanco
+0.694, mix200 0.689, faseal+escala10 0.686, base 0.686, rf50x12 0.686, ... fmax2000
+0.668, hp20 0.667, W4096 0.650, compact 0.647, sin_mix 0.645 (comb exact 0.03),
+notch50 0.640, sin_agrupar 0.507. Con 2 casas de combinadas, las ventajas de
+augment / fase aleatoria del barrido anterior (1 sola casa) DESAPARECEN: todo
+está dentro de ±1 desvío de la base. Robusto en ambos: agrupar resistivas,
+usar mezclas, no usar notch, rawfft > compact, W2048 > W4096.
+Fallas en casa nueva: luces F1 0.36/0.37, heladera en combinadas 0.14,
+aireinverter (2 ráfagas, casa+depamica) arrastra falsos positivos de heladera,
+lavarropa y tele; tele (1 sola ráfaga, casa) aparece como falso positivo.
+Cuello de botella: pocas unidades distintas por clase, no el modelo.
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:

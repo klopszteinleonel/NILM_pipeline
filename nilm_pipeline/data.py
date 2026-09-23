@@ -17,16 +17,24 @@ acelerar la carga en Colab/Drive.
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 
 NOMBRE_CARPETA_COMBINADAS = "combinadas"
-CAMPOS_MANIFEST = ["ruta", "tipo", "categoria", "clases", "lugar", "fs",
+CAMPOS_MANIFEST = ["ruta", "tipo", "categoria", "clases", "lugar", "sesion", "rafaga", "fs",
                    "duracion", "muestras", "sha1", "fecha_archivo"]
+
+# Una SESIÓN = capturas del mismo lugar sin pausas de más de GAP_SESION_S.
+# Una RÁFAGA = capturas consecutivas de la misma etiqueta, dentro de una sesión,
+# separadas por menos de GAP_RAFAGA_S: son casi duplicados (mismo estado del
+# aparato) y NUNCA deben quedar repartidas entre train y test.
+GAP_SESION_S = 20 * 60
+GAP_RAFAGA_S = 90
 
 TIPO_INDIVIDUAL = "individual"
 TIPO_COMBINADA = "combinada_real"
@@ -52,6 +60,8 @@ class Registro:
     tipo: str               # TIPO_INDIVIDUAL | TIPO_COMBINADA
     datos: np.ndarray       # señal float32
     grupo: str              # id de captura (= ruta sin extensión)
+    sesion: str = ""        # lugar_fecha_n (ver asignar_sesiones)
+    rafaga: str = ""        # sesion_rN
 
     def multi_hot_en(self, clases: list) -> np.ndarray:
         return multi_hot(self.clases, clases)
@@ -78,6 +88,15 @@ class Dataset:
     def grupos(self) -> np.ndarray:
         return np.array([r.grupo for r in self.registros])
 
+    def sesiones(self) -> np.ndarray:
+        return np.array([r.sesion for r in self.registros])
+
+    def rafagas(self) -> np.ndarray:
+        return np.array([r.rafaga for r in self.registros])
+
+    def lugares(self) -> np.ndarray:
+        return np.array([r.lugar for r in self.registros])
+
     def tipos(self) -> np.ndarray:
         return np.array([r.tipo for r in self.registros])
 
@@ -99,16 +118,18 @@ class Dataset:
         regs = []
         for r in self.registros:
             clases = tuple(sorted({mapa.get(c, c) for c in r.clases}))
-            regs.append(Registro(r.ruta, clases, r.lugar, r.fs, r.muestras, r.tipo, r.datos, r.grupo))
+            regs.append(replace(r, clases=clases))
         clases = sorted({c for r in regs for c in r.clases})
         return Dataset(regs, clases, self.manifest_filas, self.manifest_hash, self.problemas)
 
-    def excluir_clases_raras(self, min_capturas: int) -> tuple["Dataset", list]:
-        """Quita las clases con menos de `min_capturas` capturas individuales,
-        sus capturas y toda combinada que las contenga. Devuelve (dataset, excluidas)."""
-        conteo = {c: sum(1 for r in self.registros if r.tipo == TIPO_INDIVIDUAL and r.clases == (c,))
-                  for c in self.clases}
-        raras = sorted(c for c, n in conteo.items() if n < min_capturas)
+    def excluir_clases_raras(self, min_capturas: int, min_rafagas: int = 1) -> tuple["Dataset", list]:
+        """Quita las clases con menos de `min_capturas` capturas individuales o
+        menos de `min_rafagas` ráfagas (ocasiones independientes), sus capturas y
+        toda combinada que las contenga. Devuelve (dataset, excluidas)."""
+        ind = [r for r in self.registros if r.tipo == TIPO_INDIVIDUAL]
+        conteo = {c: sum(1 for r in ind if r.clases == (c,)) for c in self.clases}
+        n_raf = {c: len({r.rafaga for r in ind if r.clases == (c,)}) for c in self.clases}
+        raras = sorted(c for c in self.clases if conteo[c] < min_capturas or n_raf[c] < min_rafagas)
         if not raras:
             return self, []
         regs = [r for r in self.registros if not set(r.clases) & set(raras)]
@@ -124,14 +145,20 @@ class Dataset:
         n_nada = sum(1 for r in self.registros if r.tipo == TIPO_NADA)
         lineas.append(f"  individuales: {n_ind} | combinadas reales: {n_comb} "
                       f"| sin carga: {n_nada}")
+        lineas.append(f"  lugares: {len(set(r.lugar for r in self.registros))} | sesiones: "
+                      f"{len(set(r.sesion for r in self.registros))} | ráfagas individuales: "
+                      f"{len({r.rafaga for r in self.registros if r.tipo != TIPO_COMBINADA})}")
         for c in self.clases:
             inds = [r for r in self.registros
                     if r.tipo == TIPO_INDIVIDUAL and c in r.clases]
             combs = [r for r in self.registros
                      if r.tipo == TIPO_COMBINADA and c in r.clases]
-            aviso = "  <- POCAS CAPTURAS" if 0 < len(inds) < min_capturas_aviso else ""
-            lineas.append(f"  {c:16s} individuales={len(inds):3d} "
-                          f"en_combinadas={len(combs):3d}{aviso}")
+            n_raf = len({r.rafaga for r in inds})
+            lug = sorted({r.lugar for r in inds})
+            aviso = "  <- POCAS CAPTURAS" if 0 < len(inds) < min_capturas_aviso else (
+                "  <- UNA SOLA RÁFAGA" if n_raf == 1 else "")
+            lineas.append(f"  {c:16s} individuales={len(inds):3d} ráfagas={n_raf:2d} "
+                          f"en_combinadas={len(combs):3d} lugares={','.join(lug)}{aviso}")
         if self.problemas:
             lineas.append(f"  PROBLEMAS ({len(self.problemas)}):")
             lineas += [f"    {p}" for p in self.problemas]
@@ -222,6 +249,42 @@ def guardar_manifest(filas: list, salida_csv: str | Path) -> None:
         w.writerows(filas)
 
 
+def _timestamp(ruta: str) -> dt.datetime | None:
+    """Fecha-hora del nombre de archivo de capturar.py: YYYYMMDD_HHMMSS_*.json."""
+    try:
+        return dt.datetime.strptime(Path(ruta).name[:15], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def asignar_sesiones(registros: list, gap_sesion: float = GAP_SESION_S,
+                     gap_rafaga: float = GAP_RAFAGA_S) -> list:
+    """Devuelve los registros con `sesion` y `rafaga` asignadas a partir del
+    lugar y la hora del nombre de archivo. Capturas sin hora parseable quedan
+    como sesión y ráfaga propias."""
+    out, por_lugar = [], {}
+    for r in registros:
+        por_lugar.setdefault(r.lugar, []).append(r)
+    for lugar, regs in por_lugar.items():
+        con_t = sorted((r for r in regs if _timestamp(r.ruta)), key=lambda r: _timestamp(r.ruta))
+        sin_t = [r for r in regs if not _timestamp(r.ruta)]
+        n_ses, n_raf, prev = 0, 0, None
+        for r in con_t:
+            t = _timestamp(r.ruta)
+            if prev is None or (t - _timestamp(prev.ruta)).total_seconds() > gap_sesion:
+                n_ses, n_raf = n_ses + 1, n_raf + 1
+            elif r.clases != prev.clases or r.tipo != prev.tipo or \
+                    (t - _timestamp(prev.ruta)).total_seconds() > gap_rafaga:
+                n_raf += 1
+            ses = f"{lugar}_{t:%Y%m%d}_{n_ses}"
+            out.append(replace(r, sesion=ses, rafaga=f"{ses}_r{n_raf}"))
+            prev = r
+        for r in sin_t:
+            out.append(replace(r, sesion=f"{lugar}_{r.grupo}", rafaga=f"{lugar}_{r.grupo}"))
+    orden = {r.grupo: i for i, r in enumerate(registros)}
+    return sorted(out, key=lambda r: orden[r.grupo])
+
+
 def cargar_dataset(data_dir: str | Path,
                    incluir_combinadas: bool = True,
                    min_capturas_aviso: int = 3,
@@ -266,6 +329,11 @@ def cargar_dataset(data_dir: str | Path,
             grupo=fila["ruta"].rsplit(".", 1)[0],
         ))
 
+    registros = asignar_sesiones(registros)
+    por_ruta = {r.ruta: r for r in registros}
+    for fila in filas:
+        r = por_ruta.get(fila["ruta"])
+        fila["sesion"], fila["rafaga"] = (r.sesion, r.rafaga) if r else ("", "")
     clases = sorted({c for r in registros for c in r.clases})
     return Dataset(registros=registros, clases=clases, manifest_filas=filas,
                    manifest_hash=hash_manifest(filas), problemas=problemas)
@@ -280,7 +348,8 @@ def guardar_cache(ds: Dataset, ruta_npz: str | Path) -> None:
         "clases": ds.clases,
         "manifest_hash": ds.manifest_hash,
         "registros": [{k: (list(r.clases) if k == "clases" else getattr(r, k))
-                       for k in ("ruta", "clases", "lugar", "fs", "muestras", "tipo", "grupo")}
+                       for k in ("ruta", "clases", "lugar", "fs", "muestras", "tipo", "grupo",
+                                 "sesion", "rafaga")}
                       for r in ds.registros],
     })
     arrays = {f"d{i}": r.datos for i, r in enumerate(ds.registros)}
@@ -296,6 +365,9 @@ def cargar_cache(ruta_npz: str | Path) -> Dataset:
             ruta=rm["ruta"], clases=tuple(rm["clases"]), lugar=rm["lugar"],
             fs=float(rm["fs"]), muestras=int(rm["muestras"]), tipo=rm["tipo"],
             datos=z[f"d{i}"].astype(np.float32), grupo=rm["grupo"],
+            sesion=rm.get("sesion", ""), rafaga=rm.get("rafaga", ""),
         ))
+    if any(not r.sesion for r in registros):      # cache viejo sin sesiones
+        registros = asignar_sesiones(registros)
     return Dataset(registros=registros, clases=list(meta["clases"]),
                    manifest_hash=meta.get("manifest_hash", ""))

@@ -20,14 +20,15 @@ import json
 from dataclasses import asdict, dataclass, field, replace
 
 # Campos que se serializan como lista en JSON y hay que reconvertir a tupla
-_CAMBIOS_TUPLA = ("filtro_fc", "mix_k", "mix_escala", "snr_db", "escala", "bandas_hz")
+_CAMBIOS_TUPLA = ("filtro_fc", "mix_k", "mix_escala", "snr_db", "escala", "bandas_hz", "test_congelado", "excluir_clases")
 
 ESTRATEGIAS = ("compact", "rawfft")
 VENTANAS = ("hann", "hamming", "blackman", "flattop", "rect")
 MODELOS = ("rf", "et", "hgb", "svm", "knn", "logreg")
 FILTROS = (None, "hp", "lp", "bp", "notch")
 NORMALIZACIONES = (None, "rms", "maxabs")
-CVS = ("sgkf5", "logo")
+CVS = ("lolo", "sgkf5", "logo")
+CV_GRUPOS = ("rafaga", "sesion", "captura")
 MULTI_SALIDAS = ("ovr", "nativo")
 
 
@@ -42,6 +43,10 @@ class Config:
     agrupar: dict = field(default_factory=dict)  # clase -> grupo, ej. {"calefon": "resistiva",
                                     # "horno": "resistiva"}: clases físicamente indistinguibles
                                     # (misma amplitud, THD ~0) se evalúan y exportan como una
+    excluir_clases: tuple = ()      # clases que se sacan del problema: se descartan sus
+                                    # capturas y toda combinada que las contenga
+    min_rafagas: int = 1            # ídem por ráfagas (ocasiones independientes); con 1 sola
+                                    # ráfaga una clase no se puede validar honestamente
     min_capturas: int = 3           # clases con menos capturas individuales se EXCLUYEN
                                     # (sus capturas y las combinadas que las contienen):
                                     # con 1–2 capturas no se pueden aprender ni evaluar
@@ -125,8 +130,16 @@ class Config:
                                     # "exact" = búsqueda conjunta que maximiza el exact match
 
     # ---------------- evaluación ----------------
-    cv: str = "sgkf5"               # "sgkf5" | "logo"
+    cv: str = "lolo"                # "lolo" = leave-one-lugar-out: entrena sin un lugar y
+                                    #          evalúa ahí (individuales Y combinadas) → mide
+                                    #          lo que importa: funcionar en una casa nueva
+                                    # "sgkf5" = StratifiedGroupKFold dentro del dataset
+                                    # "logo"  = leave-one-group-out (grupo = cv_grupo)
+    cv_grupo: str = "rafaga"        # unidad que nunca se reparte entre train y test en
+                                    # sgkf5/logo: "rafaga" (recomendado), "sesion", "captura"
     n_splits: int = 5
+    test_congelado: tuple = ()      # lugares o sesiones reservados: run_experiment los
+                                    # ignora; solo los usa evaluar_test_congelado()
     seed: int = 42
 
     def __post_init__(self):
@@ -159,6 +172,10 @@ class Config:
             e.append(f"normalizar={self.normalizar!r} no está en {NORMALIZACIONES}")
         if self.umbral_criterio not in ("f1", "exact"):
             e.append("umbral_criterio debe ser 'f1' o 'exact'")
+        if self.cv_grupo not in CV_GRUPOS:
+            e.append(f"cv_grupo={self.cv_grupo!r} no está en {CV_GRUPOS}")
+        if self.min_rafagas < 1:
+            e.append("min_rafagas debe ser >= 1")
         if self.cv not in CVS:
             e.append(f"cv={self.cv!r} no está en {CVS}")
         if self.filtro not in FILTROS:
@@ -193,7 +210,14 @@ class Config:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
-        d = dict(d)
+        """Tolera configs de versiones anteriores: los campos que ya no existen se
+        ignoran con un aviso y los que faltan toman su default."""
+        import dataclasses, warnings
+        validos = {f.name for f in dataclasses.fields(cls)}
+        viejos = sorted(set(d) - validos)
+        if viejos:
+            warnings.warn(f"Config: se ignoran campos de una versión anterior: {viejos}")
+        d = {k: v for k, v in d.items() if k in validos}
         for k in _CAMBIOS_TUPLA:
             if k in d and isinstance(d[k], list):
                 d[k] = tuple(d[k])
@@ -222,14 +246,16 @@ class Config:
         aug = (f"_aug{self.aug_n}{self.ruido_tipo[0]}{self.snr_db[0]:g}-{self.snr_db[1]:g}"
                + ("h" if self.hum50 else "") + ("j" if self.jitter_red else "")) if self.aug_n > 0 else ""
         fil = f"_f{self.filtro}{self.filtro_fc[0]:g}" if self.filtro else ""
-        agr = f"_agr{len(set(self.agrupar.values()))}" if self.agrupar else ""
+        agr = (f"_agr{len(set(self.agrupar.values()))}" if self.agrupar else "") + (
+            f"_sin{len(self.excluir_clases)}" if self.excluir_clases else "")
         est = f"{self.estrategia}{self.rawfft_fmax:.0f}" if self.estrategia == "rawfft" else self.estrategia
         arb = f"{self.n_estimators}x{self.max_depth if self.max_depth is not None else 'inf'}"
         fase = "_fasealeat" if self.mix_fase == "aleatoria" else (
             f"_jit{self.mix_jitter_fase:g}" if self.mix_jitter_fase > 0 else "")
         ms = "_nativo" if self.multi_salida == "nativo" else ""
         uc = "_uexact" if self.umbral_criterio == "exact" else ""
-        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{ms}{mix}{fase}{aug}{fil}{agr}{uc}"
+        cv = self.cv if self.cv == "lolo" else f"{self.cv}-{self.cv_grupo}"
+        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{ms}{mix}{fase}{aug}{fil}{agr}{uc}_{cv}"
 
 
 # Preset de referencia (baseline del plan)

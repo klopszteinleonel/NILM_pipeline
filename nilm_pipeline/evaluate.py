@@ -79,7 +79,8 @@ def umbrales_optimos(Y: np.ndarray, P: np.ndarray, grilla=None) -> np.ndarray:
         if Y[:, j].sum() == 0:
             continue
         f1s = [f1_score(Y[:, j], (P[:, j] >= u).astype(int), zero_division=0) for u in grilla]
-        out[j] = grilla[int(np.argmax(f1s))]
+        if max(f1s) > 0:            # sin ningún acierto el umbral no tiene información: queda 0.5
+            out[j] = grilla[int(np.argmax(f1s))]
     return out
 
 
@@ -128,20 +129,23 @@ def reporte(metricas: dict, clases: list,
             bloques=(("ind", "REALES individuales"), ("comb", "REALES combinadas"),
                      ("todas", "REALES todas (ind+comb)"), ("mix", "sintéticas (mix)"))) -> str:
     """Tabla por bloque de capturas reales: por ventana, por captura (media de
-    probabilidades de sus ventanas, umbral 0.5) y por captura con umbrales por
-    clase aprendidos en las individuales out-of-fold (+umbr)."""
+    probabilidades de sus ventanas, umbral 0.5), por captura con umbrales por
+    clase aprendidos en las individuales out-of-fold (+umbr; no se muestra para
+    ind/todas porque ahí sería optimista) y sobre clases vistas (en lolo: sin
+    contar aparatos que solo existen en la casa de test)."""
     lineas = []
     cab = ("n", "exact", "hamming", "f1_micro", "f1_macro", "prec", "rec")
-    etiqueta_nivel = {"v": "por ventana", "c": "por captura", "u": "por captura +umbr"}
+    etiqueta_nivel = {"v": "por ventana", "c": "por captura", "u": "por captura +umbr",
+                      "s": "clases vistas"}
     for b, titulo in bloques:
         if f"{b}_c_n" not in metricas:
             continue
         lineas.append(f"{titulo:24s}" + "".join(f"{c:>9s}" for c in cab))
-        for nivel in ("v", "c", "u"):
+        for nivel in ("v", "c", "u", "s"):
             p = f"{b}_{nivel}_"
             if p + "n" not in metricas:
                 continue
-            vals = (str(metricas[p + "n"]),
+            vals = (str(int(metricas[p + "n"])),
                     *(f"{metricas[p + k]:.3f}" for k in
                       ("exact_match", "hamming", "f1_micro", "f1_macro", "precision_macro", "recall_macro")))
             lineas.append(f"  {etiqueta_nivel[nivel]:22s}" + "".join(f"{v:>9s}" for v in vals))

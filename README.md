@@ -30,6 +30,18 @@ Código y datos viven en dos repos privados:
 Para agregar datos: subir los JSON al repo del dataset y volver a correr la
 celda 0 (hace `pull`) y la de ingesta.
 
+## Validación
+
+El objetivo es funcionar en casas que el modelo nunca vio, así que la
+validación por default es **leave-one-lugar-out**: se entrena sin un lugar y se
+evalúan sus individuales y sus combinadas. Las capturas se agrupan en
+**sesiones** y **ráfagas** (capturas de la misma carga con segundos de
+diferencia) a partir del nombre de archivo; una ráfaga nunca se reparte entre
+train y test. Cada experimento se corre con varias semillas (`run_repetido`) y
+dos configuraciones se comparan de forma pareada (`comparar`). Lugares o
+sesiones en `Config.test_congelado` quedan fuera de todos los barridos y se
+evalúan una sola vez al final (`evaluar_test_congelado`).
+
 ## Flujo del notebook
 
 | Sección | Qué hace |
@@ -38,10 +50,11 @@ celda 0 (hace `pull`) y la de ingesta.
 | 2 Config | `Config()`: única fuente de verdad de todos los parámetros |
 | 3 Sanity | señal/espectro por clase, una mezcla sintética, augment |
 | 4 Features | tabla de features `compact` por clase |
-| 5 Baseline | `run_experiment` → CV por captura, 3 bloques (ind / mix / real) |
-| 6 Barridos | diccionario de variantes `CFG.clonar(...)` → `leaderboard.csv` |
-| 7 Mejor | LOGO, matrices por clase, umbrales óptimos, importancias |
+| 5 Baseline | `run_repetido` con LOLO (5 semillas) + referencia sgkf5 por ráfaga; bloques ind / comb / todas |
+| 6 Barridos | variantes `CFG.clonar(...)` con 3 semillas c/u → `leaderboard.csv` (media ± desvío) + `comparar` |
+| 7 Elegido | reporte LOLO, detalle por combinación, matrices por clase, importancias |
 | 8 Export | `entrenar_final` → `exportar` → `test_paridad` (gcc) → robustez SNR |
+| 9 Test congelado | `evaluar_test_congelado` una sola vez sobre lo reservado |
 
 ## Datos
 

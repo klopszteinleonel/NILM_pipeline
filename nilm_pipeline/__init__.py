@@ -1,7 +1,7 @@
 """Pipeline de clasificación/desagregación NILM (Colab -> ESP32-S3)."""
 
 from .config import Config, BASELINE
-from .data import (Dataset, Registro, cargar_dataset, escanear, hash_manifest,
+from .data import (Dataset, Registro, cargar_dataset, escanear, hash_manifest, asignar_sesiones,
                    guardar_manifest, guardar_cache, cargar_cache,
                    parsear_categorias, multi_hot,
                    TIPO_INDIVIDUAL, TIPO_COMBINADA, TIPO_NADA, CLASE_NADA)
@@ -17,6 +17,7 @@ from .evaluate import (metricas_multilabel, agregar_por_grupo, matrices_por_clas
                        umbrales_optimos, umbrales_optimos_exact, importancias, reporte, reporte_combinaciones)
 from .train import (Resultado, construir_modelo, predecir_proba, costo_modelo,
                     armar_conjunto, armar_conjunto_train, dividir, run_experiment,
+                    Repetido, run_repetido, comparar, evaluar_test_congelado, preparar_dataset,
                     entrenar_final, registrar, cargar_leaderboard, robustez_snr)
 
 from .export import exportar, test_paridad, config_pipeline
