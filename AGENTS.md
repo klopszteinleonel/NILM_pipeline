@@ -53,6 +53,8 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
     (0/1) en vez de promediar fracciones de hoja → probabilidades distintas
     a sklearn; `loadable` cuantiza a int16. Umbrales de nodo redondeados hacia
     abajo a float32 para preservar `f32 <= thr64`.
+  - `eda.py` — Parte A del notebook (EDA, no entrena). `calcular_espectros(ds)`
+    + funciones `plot_*` y tablas. Cada ráfaga pesa igual dentro de su clase.
 
 ## Flujo por fold (para train.py)
 ```
