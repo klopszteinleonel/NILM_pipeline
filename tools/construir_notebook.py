@@ -142,7 +142,7 @@ display(eda.atipicas(E))
 md("""
 **Lectura.**
 - **Sin saturación ni capturas dañadas**: máximo 22.3 A contra un riel de ±24.75 A. El loader tampoco reporta archivos inválidos ni faltantes.
-- **El offset es una marca del lugar**: unos -25 mA en `casa`, +118 en `depaleo`, +105 en `depamica`. Si llegara al modelo, aprendería a reconocer la casa. El pipeline lo quita por ventana, y esto confirma que hay que seguir haciéndolo. Queda sin explicar por qué `aire` en `local` da -223 mA contra +85 del resto de esa sesión.
+- **El offset es una marca del lugar**: unos -25 mA en `casa`, +118 en `depaleo`, +105 en `depamica`. Si llegara al modelo, aprendería a reconocer la casa. El pipeline lo quita por ventana, y esto confirma que hay que seguir haciéndolo. En `local` además varió dentro de la sesión: unos -200 mA en los dos aires (18:25 a 18:30), +27 mA a las 18:37 y ~+85 mA desde las 18:44. No depende del equipo, porque los dos aires dan lo mismo, y la causa no se conoce.
 - **La red se mueve**: 49.98 a 50.19 Hz entre capturas. A partir de la armónica ~26 (1.3 kHz) eso ya corre la línea un bin completo, así que una franja muy angosta y fija en alta frecuencia se perdería la armónica.
 - **Atípicas para revisar**: `lavarropa/20260922_180045` mide 81 mA contra 1.35 A de mediana; parece la máquina detenida con la etiqueta puesta. Las demás `lavarropa`, y un `aireinverter` de `casa` (0.77 A contra ~1.8 A), parecen cambios de estado reales.
 """)
@@ -217,7 +217,8 @@ md("""
 **Lectura.**
 - **Transfieren bien entre lugares**: resistivas, `lavarropa` y, en buena medida, `heladera` y `aire`.
 - **No transfiere**: `aireinverter`. Entre sus dos unidades hay diferencias de un orden de magnitud por armónica.
-- **`lavarropa` es sospechosamente igual** entre `depaleo` y `depamica` (1.67 dB de diferencia de forma). Si es la misma máquina o el mismo modelo, no dice nada sobre generalizar a otro lavarropas.
+- **`lavarropa` generaliza muy bien**: son máquinas distintas y su forma difiere apenas 1.67 dB entre `depaleo` y `depamica`. Son solo dos unidades, así que falta confirmarlo con más.
+- **Una ráfaga no es un equipo, ni un lugar es un equipo**: en `local` se midieron dos aires, uno normal y un aire ventana, con H3 muy distinta (1.29 A y 0.51 A).
 - `luces` conserva el patrón impar, pero su amplitud cambia con la cantidad y el tipo de lámparas.
 """)
 
@@ -275,7 +276,7 @@ md("""
 - **`aireinverter`**: casi todo el rango alto, incluso en combinadas. Ojo: son 2 ráfagas individuales, y sus combinadas son todas del mismo equipo.
 - **`heladera`**: no tiene una franja propia; solo se destaca por tener menos que el resto.
 
-**El resultado más importante está en el panel de combinadas**: solo `aireinverter` y `resistiva` (H1) superan el azar. `heladera`, `lavarropa` y `luces` **no tienen ninguna armónica que por sí sola las delate en una mezcla real**. Esto no prueba que sean indetectables, porque un clasificador combina varias. De hecho, el modelo logra F1 0.91 con `lavarropa` en combinadas, aunque ahí puede ayudar que parece ser la misma máquina (A6). En cambio `heladera` (0.38) y `luces` (0.35) sí son las difíciles. Falta `aire`: en `depaleo` casi todas las combinadas lo tienen, y no hay contra qué compararlo.
+**El resultado más importante está en el panel de combinadas**: solo `aireinverter` y `resistiva` (H1) superan el azar. `heladera`, `lavarropa` y `luces` **no tienen ninguna armónica que por sí sola las delate en una mezcla real**. Esto no prueba que sean indetectables, porque un clasificador combina varias. De hecho, el modelo logra F1 0.91 con `lavarropa` en combinadas, y son dos máquinas distintas (A6). En cambio `heladera` (0.38) y `luces` (0.35) sí son las difíciles. Falta `aire`: en `depaleo` casi todas las combinadas lo tienen, y no hay contra qué compararlo.
 
 **Cuidado con la forma en armónicas altas**: dividir por H1 infla el piso en cargas chicas y lo achica en las grandes. Parte de los puntos de `luces` y `resistiva` por encima de k≈25 pueden ser ese efecto.
 """)
@@ -329,7 +330,7 @@ md("""
 **Lectura.**
 - **La fundamental suma lineal**: real / suma lineal = 1.02 en la mediana. Las cargas están casi en fase.
 - **Las armónicas no**: desde H3, las impares dan 0.75 contra la suma lineal y 0.97 contra la cuadrática. **Se comportan como si tuvieran fases sin relación**, porque cada carga tiene su propio ángulo en cada armónica.
-- **Para el pipeline**: alinear las mezclas sintéticas por la fundamental es correcto para H1, pero hay que verificar que no sobreestime las armónicas. Es una razón física para las variantes de fase que ya se probaron, y lo más correcto sería alinear por la fase de tensión.
+- **Para el pipeline**: las mezclas sintéticas alineadas por la fundamental ya reproducen este comportamiento (medido aparte contra la suma lineal: H1 1.00, impares 0.77, pares 0.83; las reales dan 1.02, 0.75 y 0.87), porque cada carga conserva sus propias fases de armónicas. La fase aleatoria, en cambio, subestima H1 (0.89).
 - **Dispersión grande**: `lavarropa` cambia de estado, así que la "carga sola" no siempre es la que estaba en la combinada. Los puntos muy por encima de la diagonal son de combinaciones con `lavarropa`.
 """)
 
