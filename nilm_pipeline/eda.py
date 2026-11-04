@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap, PowerNorm
+from matplotlib.patches import Rectangle
 from scipy.cluster.hierarchy import leaves_list, linkage
 from scipy.spatial.distance import squareform
 from scipy.stats import rankdata, spearmanr
@@ -32,6 +33,11 @@ LSB_A = 15.0 * 3.3 / 4096           # 12.08 mA por cuenta con k = 15
 RIEL_A = 2048 * LSB_A               # ±24.75 A pico = 17.5 A RMS senoidal
 N_ARMONICAS = 60                    # hasta 3 kHz: arriba no hay señal (ver snr_por_banda)
 PISO_ETIQUETA = "nada"
+# En estas clases cada ocasión es una configuración distinta (ej. otra cantidad de lámparas) y el
+# cambio entre capturas puede tardar menos que la pausa que separa ráfagas. Una captura abre una
+# ocasión nueva si su RMS salta más que SALTO_NIVEL_DB: las cargas estables saltan ~1 dB como mucho.
+CLASES_POR_CONFIGURACION = ("luces",)
+SALTO_NIVEL_DB = 1.5
 H1_MIN_F0_A = 0.1                   # con menos fundamental, la f0 estimada no es confiable
 
 # --- paleta: colores fijos por lugar, secuencial de un tono, divergente azul-rojo
@@ -97,6 +103,17 @@ def _ciclo_promedio(x: np.ndarray, f0: float, fs: float, n: int = 200) -> np.nda
     return suma / np.maximum(cuenta, 1)
 
 
+def _separar_por_nivel(tabla: pd.DataFrame) -> pd.Series:
+    """Ráfagas de CLASES_POR_CONFIGURACION divididas donde el nivel salta: 'r17' pasa a 'r17.0', 'r17.1'..."""
+    out = tabla["rafaga"].copy()
+    for _, g in tabla[tabla["etiqueta"].isin(CLASES_POR_CONFIGURACION)].groupby("rafaga"):
+        saltos = np.abs(20 * np.log10(g["rms_A"].values[1:] / g["rms_A"].values[:-1])) > SALTO_NIVEL_DB
+        if saltos.any():
+            n = np.r_[0, np.cumsum(saltos)]
+            out.loc[g.index] = [f"{r}.{i}" for r, i in zip(g["rafaga"], n)]
+    return out
+
+
 def calcular_espectros(ds: Dataset, W: int = 2048, solape: float = 0.5) -> Espectros:
     cfg = Config(W=W, solape=solape)
     fs = ds.fs()
@@ -123,6 +140,7 @@ def calcular_espectros(ds: Dataset, W: int = 2048, solape: float = 0.5) -> Espec
         mags.append(mag); Hs.append(H); f0s.append(f0); caps.append(np.full(len(V), i))
         ciclos.append(_ciclo_promedio(ac, float(np.median(f0)), fs))
     tabla = pd.DataFrame(filas)
+    tabla["rafaga"] = _separar_por_nivel(tabla)
     cap = np.concatenate(caps)
 
     # peso = 1 / (ventanas de la ráfaga · ráfagas de la etiqueta)
@@ -743,6 +761,235 @@ def plot_pca_cargas(E: Espectros, fmax: float = 3000.0, ver_hasta: float = 1000.
         ax.set_ylabel("carga"); ax.set_title(f"PC{i + 1} ({ev[i] * 100:.0f} % de la varianza)", loc="left")
     axs[-1].set_xlabel("f [Hz]")
     fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------- distribución dentro de cada clase --
+
+UMBRAL_NIVEL_DB = 6.0       # el doble (o la mitad) de corriente
+UMBRAL_FORMA_DB = 8.0       # ~percentil 95 de lo que difiere una captura del resto de su ráfaga
+MARCADOR_LUGAR = {"casa": "o", "depaleo": "o", "depamica": "o", "local": "s"}
+
+
+def _vectores_db(E: Espectros, kmax: int = 40) -> tuple:
+    """Firma de cada captura: mediana de |H_k| en dB, recortada al piso de `nada`, para que
+    las armónicas que nadie puede distinguir del ruido no cuenten como diferencias."""
+    s = E.ventanas(PISO_ETIQUETA)
+    p = _cuantil_ponderado(E.H[s][:, :kmax], E.peso[s], 0.99)
+    A = np.array([20 * np.log10(np.maximum(np.median(E.H[E.cap == i][:, :kmax], axis=0), p))
+                  for i in range(len(E.tabla))])
+    return A, 20 * np.log10(p)
+
+
+def _comparar(a: np.ndarray, b: np.ndarray, p: np.ndarray) -> tuple:
+    """(nivel, forma, total) de a respecto de b, en dB.
+    nivel = diferencia en H1 (consume más o menos). forma = RMS de la diferencia de H_k/H1
+    sobre las armónicas que superan el piso en alguna de las dos (tiene otra firma)."""
+    m = (a > p + 1e-6) | (b > p + 1e-6)
+    m[0] = False
+    forma = np.sqrt(np.mean(((a - a[0]) - (b - b[0]))[m] ** 2)) if m.any() else 0.0
+    return a[0] - b[0], forma, np.sqrt(np.mean((a - b) ** 2))
+
+
+def _centro(A: np.ndarray, t: pd.DataFrame) -> np.ndarray:
+    """Mediana de las medianas por ráfaga: cada ocasión pesa igual."""
+    return np.median([np.median(A[g.index], axis=0) for _, g in t.groupby("rafaga")], axis=0)
+
+
+def distribucion_muestras(E: Espectros, agrupar: dict | None = None, bloque: str = "ind",
+                          min_capturas: int = 3, kmax: int = 40) -> pd.DataFrame:
+    """Una fila por captura: cómo se ubica dentro de su categoría.
+
+    *_clase: contra el resto de la clase, SIN su propia ráfaga (si hay otra con qué comparar).
+    *_rafaga: contra las demás capturas de su ráfaga, tomadas segundos antes o después.
+    clase_vecina: la otra clase más cercana; `mas_cerca_de_otra` indica si queda más cerca de
+    ella que de la propia. Solo en individuales; las clases de un mismo grupo no compiten."""
+    agrupar = agrupar or {}
+    A, p = _vectores_db(E, kmax)
+    t = E.tabla
+    tipo = t["tipo"] == TIPO_COMBINADA
+    if bloque == "ind":
+        base, etiquetas = t[~tipo], E.clases(min_capturas, con_piso=False)
+    else:
+        base = t[tipo]
+        n = base["etiqueta"].value_counts()
+        etiquetas = list(n[n >= min_capturas].index)
+    centros = {c: _centro(A, base[base["etiqueta"] == c]) for c in etiquetas}
+    filas = []
+    for c in etiquetas:
+        g = base[base["etiqueta"] == c]
+        for i, f in g.iterrows():
+            resto = g[g["rafaga"] != f["rafaga"]]
+            ref = resto if len(resto) else g
+            nivel, forma, total = _comparar(A[i], _centro(A, ref), p)
+            propia = g[(g["rafaga"] == f["rafaga"]) & (g.index != i)]
+            n_r, f_r = (_comparar(A[i], np.median(A[propia.index], axis=0), p)[:2] if len(propia) else (np.nan, np.nan))
+            fila = {"ruta": f["ruta"], "etiqueta": c, "lugar": f["lugar"], "rafaga": f["rafaga"], "rms_A": f["rms_A"],
+                    "nivel_clase_dB": nivel, "forma_clase_dB": forma, "dist_propia_dB": total,
+                    "nivel_rafaga_dB": n_r, "forma_rafaga_dB": f_r, "clase_vecina": None, "dist_vecina_dB": np.nan}
+            if bloque == "ind":
+                otras = {k: _comparar(A[i], centros[k], p)[2] for k in etiquetas
+                         if agrupar.get(k, k) != agrupar.get(c, c)}
+                if otras:
+                    fila["clase_vecina"] = min(otras, key=otras.get)
+                    fila["dist_vecina_dB"] = otras[fila["clase_vecina"]]
+            filas.append(pd.Series(fila, name=i))
+    D = pd.DataFrame(filas)
+    D["cambia_en_rafaga"] = (D["nivel_rafaga_dB"].abs() >= UMBRAL_NIVEL_DB) | (D["forma_rafaga_dB"] >= UMBRAL_FORMA_DB)
+    D["mas_cerca_de_otra"] = D["dist_vecina_dB"] < D["dist_propia_dB"]
+    marcada = D["cambia_en_rafaga"] | D["mas_cerca_de_otra"]
+    D["id"] = pd.NA
+    D.loc[marcada, "id"] = np.arange(1, marcada.sum() + 1)
+    return D
+
+
+def muestras_atipicas(D: pd.DataFrame) -> pd.DataFrame:
+    """Capturas para revisar a mano, con el motivo. Que aparezca acá no significa que esté mal:
+    una carga con varios estados también se aparta de su ráfaga."""
+    s = D[D["id"].notna()].copy()
+    s["motivo"] = [" y ".join(m for m, v in (("cambia dentro de la ráfaga", a), ("más cerca de otra clase", b)) if v)
+                   for a, b in zip(s["cambia_en_rafaga"], s["mas_cerca_de_otra"])]
+    s["archivo"] = s["ruta"].str.split("/").str[-1].str[:15]
+    cols = ["id", "etiqueta", "lugar", "archivo", "rms_A", "nivel_rafaga_dB", "forma_rafaga_dB", "nivel_clase_dB",
+            "forma_clase_dB", "dist_propia_dB", "dist_vecina_dB", "clase_vecina", "motivo"]
+    return s[cols].set_index("id").round(2)
+
+
+def rafagas_atipicas(D: pd.DataFrame) -> pd.DataFrame:
+    """Ráfagas enteras que se apartan del resto de su clase: suele ser otro equipo u otro estado."""
+    filas = []
+    for (c, r), g in D.groupby(["etiqueta", "rafaga"], sort=False):
+        if D.loc[D["etiqueta"] == c, "rafaga"].nunique() < 2:
+            continue
+        nivel, forma = g["nivel_clase_dB"].median(), g["forma_clase_dB"].median()
+        if abs(nivel) >= UMBRAL_NIVEL_DB or forma >= UMBRAL_FORMA_DB:
+            filas.append({"etiqueta": c, "lugar": g["lugar"].iat[0], "rafaga": r.rsplit("_", 1)[-1], "capturas": len(g),
+                          "rms_A": g["rms_A"].median(), "nivel_clase_dB": nivel, "forma_clase_dB": forma})
+    return pd.DataFrame(filas).round(2)
+
+
+def _puntos_lugar(ax, x, y, lugares, s=20, alpha=0.75, **kw) -> None:
+    for L in pd.unique(lugares):
+        m = np.asarray(lugares) == L
+        ax.scatter(np.asarray(x)[m], np.asarray(y)[m], s=s, color=COLOR_LUGAR.get(L, (TINTA2,))[0], alpha=alpha, lw=0,
+                   marker=MARCADOR_LUGAR.get(L, "o"), **kw)
+
+
+def _leyenda_puntos(fig, lugares) -> None:
+    from matplotlib.lines import Line2D
+    h = [Line2D([], [], ls="", marker=MARCADOR_LUGAR.get(L, "o"), ms=6, color=COLOR_LUGAR.get(L, (TINTA2,))[0], label=L)
+         for L in sorted(lugares)]
+    fig.legend(handles=h, loc="upper right", ncols=len(h))
+
+
+def plot_distribucion_clases(D: pd.DataFrame):
+    """Vista general: qué tan dispersa es cada clase, en nivel y en forma."""
+    clases = list(pd.unique(D["etiqueta"]))
+    y = {c: len(clases) - 1 - i for i, c in enumerate(clases)}
+    rng = np.random.default_rng(0)
+    fig, axs = plt.subplots(1, 2, figsize=(13, 0.34 * len(clases) + 1.3), sharey=True)
+    for ax, col, tit, umbrales in ((axs[0], "nivel_clase_dB", "Nivel: H1 contra el resto de la clase [dB]", (-UMBRAL_NIVEL_DB, UMBRAL_NIVEL_DB)),
+                                   (axs[1], "forma_clase_dB", "Forma: firma relativa a H1 contra el resto de la clase [dB]", (UMBRAL_FORMA_DB,))):
+        for u in umbrales:
+            ax.axvline(u, color=APAGADO, lw=0.8)
+        for c in clases:
+            g = D[D["etiqueta"] == c]
+            q0, q1, q2, q3, q4 = np.percentile(g[col].values, [0, 25, 50, 75, 100])
+            ax.plot([q0, q4], [y[c]] * 2, color=EJE, lw=0.9, zorder=1)
+            ax.add_patch(Rectangle((q1, y[c] - 0.3), q3 - q1, 0.6, facecolor=SUPERFICIE, edgecolor=EJE, lw=0.9, zorder=2))
+            ax.plot([q2, q2], [y[c] - 0.3, y[c] + 0.3], color=TINTA, lw=1.5, zorder=4)
+            _puntos_lugar(ax, g[col], y[c] + rng.uniform(-0.2, 0.2, len(g)), g["lugar"], s=16, zorder=3)
+        ax.grid(axis="x"); ax.set_xlabel(tit)
+    axs[0].axvline(0, color=EJE, lw=0.8)
+    axs[0].set_yticks(list(y.values()), list(y.keys()))
+    _leyenda_puntos(fig, D["lugar"].unique())
+    fig.suptitle("Distribución dentro de cada categoría (punto = captura)", x=0.01, ha="left", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return fig
+
+
+def plot_nivel_forma(D: pd.DataFrame, ncols: int = 4):
+    """Nivel contra forma, por clase. Las líneas son los umbrales de revisión de ráfagas; los
+    números son las capturas de `muestras_atipicas`."""
+    clases = list(pd.unique(D["etiqueta"]))
+    fig, axs = _malla(len(clases), ncols, 13.5, 2.6, sharex=True, sharey=True)
+    for ax, c in zip(axs, clases):
+        g = D[D["etiqueta"] == c]
+        for u in (-UMBRAL_NIVEL_DB, UMBRAL_NIVEL_DB):
+            ax.axvline(u, color=GRILLA, lw=0.8)
+        ax.axhline(UMBRAL_FORMA_DB, color=GRILLA, lw=0.8)
+        _puntos_lugar(ax, g["nivel_clase_dB"], g["forma_clase_dB"], g["lugar"], s=24, zorder=3)
+        for _, f in g[g["id"].notna()].iterrows():
+            ax.scatter(f["nivel_clase_dB"], f["forma_clase_dB"], s=44, facecolor="none", edgecolor=TINTA, lw=0.8, zorder=4)
+            ax.annotate(str(f["id"]), (f["nivel_clase_dB"], f["forma_clase_dB"]), xytext=(4, 3), textcoords="offset points",
+                        fontsize=7.5, color=TINTA, zorder=5)
+        ax.set_title(c, loc="left")
+    for ax in axs[:: ncols]:
+        ax.set_ylabel("forma [dB]")
+    for ax in axs[max(0, len(clases) - ncols):len(clases)]:
+        ax.tick_params(labelbottom=True); ax.set_xlabel("nivel [dB]")
+    _leyenda_puntos(fig, D["lugar"].unique())
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return fig
+
+
+def plot_mapa_muestras(E: Espectros, D: pd.DataFrame, kmax: int = 40, ncols: int = 3, lim: float = 20.0):
+    """Cada fila es una captura; cada columna, una armónica. Rojo: tiene más que el centro de
+    su clase. Azul: menos. Las filas se agrupan por lugar y ráfaga, separadas por una línea."""
+    A, _ = _vectores_db(E, kmax)
+    clases = list(pd.unique(D["etiqueta"]))
+    fig, axs = _malla(len(clases), ncols, 13.5, 2.7, sharex=True)
+    for ax, c in zip(axs, clases):
+        g = D[D["etiqueta"] == c].sort_values("lugar", kind="stable")     # dentro de cada lugar, en orden de captura
+        M = A[g.index] - _centro(A, E.tabla.loc[g.index])
+        pc = ax.imshow(M, cmap=DIVERGENTE, vmin=-lim, vmax=lim, aspect="auto", interpolation="nearest",
+                       extent=(0.5, kmax + 0.5, len(g) - 0.5, -0.5))
+        cambios = np.where(g["rafaga"].values[1:] != g["rafaga"].values[:-1])[0]
+        for b in cambios:
+            ax.axhline(b + 0.5, color=SUPERFICIE, lw=1.5)
+        inicios = np.r_[0, cambios + 1, len(g)]
+        ax.set_yticks((inicios[:-1] + inicios[1:] - 1) / 2,
+                      [f"{g['lugar'].iat[i]} {g['rafaga'].iat[i].rsplit('_', 1)[-1]}" for i in inicios[:-1]], fontsize=7)
+        ax.tick_params(axis="y", length=0)
+        ax.spines[:].set_visible(False)
+        for fila, v in enumerate(g["id"].values):
+            if pd.notna(v):
+                ax.text(kmax + 0.9, fila, str(v), fontsize=6.5, va="center", color=TINTA, clip_on=False)
+        ax.set_title(c, loc="left")
+    for ax in axs[max(0, len(clases) - ncols):len(clases)]:
+        ax.tick_params(labelbottom=True); ax.set_xlabel("armónica k")
+    fig.tight_layout(rect=(0, 0, 0.92, 1), w_pad=2.2)
+    cax = fig.add_axes([0.935, 0.3, 0.012, 0.4])
+    fig.colorbar(pc, cax=cax, label="dB contra el centro de la clase", extend="both")
+    return fig
+
+
+def plot_pca_muestras(E: Espectros, D: pd.DataFrame, kmax: int = 40, ncols: int = 4):
+    """Todas las capturas en un mismo plano. El PCA se ajusta sobre ráfagas para que los casi
+    duplicados no decidan los ejes; después se proyectan todas las capturas."""
+    A, _ = _vectores_db(E, kmax)
+    X = A[D.index]
+    R = np.array([np.median(X[(D["rafaga"] == r).values], axis=0) for r in D["rafaga"].unique()])
+    medio = R.mean(axis=0)
+    _, ev, Vt = _pca(R)
+    Z = (X - medio) @ Vt[:2].T
+    clases = list(pd.unique(D["etiqueta"]))
+    fig, axs = _malla(len(clases), ncols, 13.5, 2.75, sharex=True, sharey=True)
+    for ax, c in zip(axs, clases):
+        s = (D["etiqueta"] == c).values
+        ax.scatter(Z[~s, 0], Z[~s, 1], s=8, color=GRILLA, lw=0)
+        _puntos_lugar(ax, Z[s, 0], Z[s, 1], D["lugar"].values[s], s=24, zorder=3)
+        for (zx, zy), v in zip(Z[s], D["id"].values[s]):
+            if pd.notna(v):
+                ax.scatter(zx, zy, s=44, facecolor="none", edgecolor=TINTA, lw=0.8, zorder=4)
+                ax.annotate(str(v), (zx, zy), xytext=(4, 3), textcoords="offset points", fontsize=7.5, zorder=5)
+        ax.set_title(c, loc="left")
+    for ax in axs[:: ncols]:
+        ax.set_ylabel(f"PC2 ({ev[1] * 100:.0f} %)")
+    for ax in axs[max(0, len(clases) - ncols):len(clases)]:
+        ax.tick_params(labelbottom=True); ax.set_xlabel(f"PC1 ({ev[0] * 100:.0f} %)")
+    _leyenda_puntos(fig, D["lugar"].unique())
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     return fig
 
 
