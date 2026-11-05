@@ -39,6 +39,7 @@ PISO_ETIQUETA = "nada"
 CLASES_POR_CONFIGURACION = ("luces",)
 SALTO_NIVEL_DB = 1.5
 H1_MIN_F0_A = 0.1                   # con menos fundamental, la f0 estimada no es confiable
+SESGO_F0_HZ = 0.074                 # estimar_f0 lee de más con W=2048 (medido contra la fase de las capturas)
 
 # --- paleta: colores fijos por lugar, secuencial de un tono, divergente azul-rojo
 SUPERFICIE, TINTA, TINTA2, APAGADO, GRILLA, EJE = ("#fcfcfb", "#0b0b0b", "#52514e", "#898781",
@@ -226,8 +227,8 @@ def calidad(E: Espectros) -> dict:
     t = E.tabla
     df_bin = E.fs / E.W
     r = t[t["h1_A"] > H1_MIN_F0_A]
-    f0 = r.groupby("sesion").agg(f0_min=("f0_min", "min"), f0_mediana=("f0_hz", "median"), f0_max=("f0_max", "max"))
-    desvio = (r["f0_hz"] - 50.0).abs().max()
+    f0 = r.groupby("sesion").agg(f0_min=("f0_min", "min"), f0_mediana=("f0_hz", "median"), f0_max=("f0_max", "max")) - SESGO_F0_HZ
+    desvio = (r["f0_hz"] - SESGO_F0_HZ - 50.0).abs().max()
     return {
         "capturas": len(t), "duracion_s": t["duracion_s"].value_counts().to_dict(),
         "max_abs_A": float(t["pico_A"].max()), "riel_A": RIEL_A,
@@ -235,7 +236,7 @@ def calidad(E: Espectros) -> dict:
         "dc_mA_por_lugar": t.groupby("lugar")["dc_mA"].agg(["min", "median", "max"]).round(0),
         "f0_por_sesion": f0.round(3),
         "ancho_bin_hz": df_bin,
-        "f0_captura_min_max": (float(r["f0_hz"].min()), float(r["f0_hz"].max())),
+        "f0_captura_min_max": (float(r["f0_hz"].min()) - SESGO_F0_HZ, float(r["f0_hz"].max()) - SESGO_F0_HZ),
         "armonica_que_se_corre_un_bin": df_bin / desvio,
     }
 
@@ -255,8 +256,8 @@ def plot_calidad(E: Espectros):
     r = t[t["h1_A"] > H1_MIN_F0_A]
     for i, S in enumerate(ses):
         g = r[r["sesion"] == S]
-        ax[1].plot([g["f0_min"].min(), g["f0_max"].max()], [i, i], color="#86b6ef", lw=3, solid_capstyle="round")
-        ax[1].scatter(g["f0_hz"], np.full(len(g), i), s=9, color="#1c5cab", lw=0)
+        ax[1].plot([g["f0_min"].min() - SESGO_F0_HZ, g["f0_max"].max() - SESGO_F0_HZ], [i, i], color="#86b6ef", lw=3, solid_capstyle="round")
+        ax[1].scatter(g["f0_hz"] - SESGO_F0_HZ, np.full(len(g), i), s=9, color="#1c5cab", lw=0)
     ax[1].set_yticks(range(len(ses)), [s.replace("_2026", " ") for s in ses])
     ax[1].axvline(50, color=EJE, lw=0.8); ax[1].grid(axis="x")
     ax[1].set(xlabel="f0 estimada [Hz]", title="Frecuencia de red por sesión (barra = rango, punto = captura)")

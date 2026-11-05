@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import Config
+from .features import estimar_f0
 
 
 @dataclass
@@ -49,7 +50,7 @@ def rms_por_clase(senales: list, Y: np.ndarray, clases: list) -> dict[str, float
     for j, c in enumerate(clases):
         idx = np.where((Y.sum(axis=1) == 1) & (Y[:, j] == 1))[0]
         if len(idx):
-            out[c] = float(np.median([np.sqrt(np.mean(senales[i] ** 2)) for i in idx]))
+            out[c] = float(np.median([np.std(senales[i]) for i in idx]))    # sin el offset de continua
     return out
 
 
@@ -57,6 +58,24 @@ def fase_fundamental(x: np.ndarray, fs: float, f_red: float) -> float:
     """Fase [rad] de la componente de f_red al inicio de la señal (DFT en f_red)."""
     n = np.arange(len(x))
     return float(np.angle(np.sum(x * np.exp(-2j * np.pi * f_red * n / fs))))
+
+
+def f0_captura(x: np.ndarray, fs: float, f_red: float, W: int = 2048) -> float:
+    """Frecuencia de red de una captura, estimada como en el borde."""
+    v = np.asarray(x[:W], dtype=np.float32)
+    v = v - v.mean()
+    w = np.hanning(len(v) + 1)[:-1]
+    mag = np.abs(np.fft.rfft(v * w))[None, :].astype(np.float32)
+    return float(estimar_f0(mag, np.fft.rfftfreq(len(v), 1.0 / fs), f_red)[0])
+
+
+def _armonicas_al_azar(s: np.ndarray, fs: float, f_red: float, rng: np.random.Generator) -> np.ndarray:
+    """Conserva |X(f)| y la fundamental; desde H2 cada armónica recibe una fase propia al azar."""
+    X = np.fft.rfft(np.asarray(s, dtype=np.float64))
+    k = np.rint(np.fft.rfftfreq(len(s), 1.0 / fs) / f_red).astype(np.int64)
+    fase = rng.uniform(0, 2 * np.pi, k.max() + 1)
+    fase[:2] = 0.0
+    return np.fft.irfft(X * np.exp(1j * fase[k]), n=len(s))
 
 
 def alinear_fase(x: np.ndarray, fs: float, f_red: float, fase_objetivo: float = 0.0) -> np.ndarray:
@@ -67,7 +86,7 @@ def alinear_fase(x: np.ndarray, fs: float, f_red: float, fase_objetivo: float = 
 
 def combinar(senales_sel: list, rng: np.random.Generator, mix_escala: tuple, fs: float,
              f_red: float = 50.0, modo: str = "alineada", jitter_grados: float = 0.0,
-             shift: bool = True) -> np.ndarray:
+             shift: bool = True, alinear_f0: bool = False, armonicas_azar: bool = False) -> np.ndarray:
     """Suma en tiempo de varias señales con escala aleatoria por carga.
     modo="alineada": fundamentales en fase 0 ± jitter; "aleatoria": shift uniforme.
     Se recortan a la longitud mínima común."""
@@ -78,9 +97,11 @@ def combinar(senales_sel: list, rng: np.random.Generator, mix_escala: tuple, fs:
         if shift:
             if modo == "alineada":
                 objetivo = np.deg2rad(rng.uniform(-jitter_grados, jitter_grados)) if jitter_grados > 0 else 0.0
-                s = alinear_fase(s, fs, f_red, objetivo)
+                s = alinear_fase(s, fs, f0_captura(s, fs, f_red) if alinear_f0 else f_red, objetivo)
             else:
                 s = np.roll(s, int(rng.integers(0, n)))
+        if armonicas_azar:
+            s = _armonicas_al_azar(s, fs, f_red, rng).astype(np.float32)
         out += s * np.float32(rng.uniform(*mix_escala))
     return out
 
@@ -96,7 +117,7 @@ def _tercios(rms: dict) -> tuple[list, list]:
 
 def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list,
                           cfg: Config, rng: np.random.Generator, total: int,
-                          prefijo: str = "mix", fs: float = 10000.0) -> Mezclas:
+                          prefijo: str = "mix", fs: float = 10000.0, rafagas: np.ndarray | None = None) -> Mezclas:
     """Genera `total` mezclas de K ∈ mix_k cargas desde capturas individuales.
 
     - Solo usa capturas con exactamente una clase activa como fuente de cargas
@@ -133,10 +154,17 @@ def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clas
             extra = rng.choice(resto, size=faltan, replace=cfg.mix_misma_clase)
             elegidas += [str(x) for x in np.atleast_1d(extra)]
 
-        idx = [int(rng.choice(por_clase[c])) for c in elegidas]
+        if cfg.mix_por_rafaga and rafagas is not None:
+            idx = []
+            for c in elegidas:
+                r = rng.choice(np.unique(rafagas[por_clase[c]]))
+                idx.append(int(rng.choice(por_clase[c][rafagas[por_clase[c]] == r])))
+        else:
+            idx = [int(rng.choice(por_clase[c])) for c in elegidas]
 
         out_senales.append(combinar([senales[j] for j in idx], rng, cfg.mix_escala, fs,
-                                    cfg.f_red, cfg.mix_fase, cfg.mix_jitter_fase))
+                                    cfg.f_red, cfg.mix_fase, cfg.mix_jitter_fase,
+                                    alinear_f0=cfg.mix_alinear_f0, armonicas_azar=cfg.mix_armonicas_azar))
         out_y.append(np.bitwise_or.reduce(Y[idx], axis=0))
         out_grupos.append(f"{prefijo}_{i:04d}")
         out_orig.append(tuple(str(grupos[j]) for j in idx))

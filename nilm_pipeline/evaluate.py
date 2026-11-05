@@ -119,7 +119,7 @@ def importancias(modelo, nombres: list) -> dict:
         ests = [modelo]
     imps = [getattr(e, "feature_importances_", None) for e in ests]
     imps = [i for i in imps if i is not None]
-    if not imps:
+    if not imps or len({len(i) for i in imps}) > 1:     # franjas: cada bosque ve otros bins
         return {}
     media = np.mean(imps, axis=0)
     return dict(sorted(zip(nombres, media.tolist()), key=lambda kv: -kv[1]))

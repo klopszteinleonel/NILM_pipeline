@@ -13,6 +13,7 @@ sklearn), de modo que la salida C es bit-a-bit la de `predict_proba`.
 Archivos generados en `carpeta`:
   nilm_modelo.h          bosques (un array de nodos por clase) + nilm_predict_proba()
   nilm_config.h          #defines del pipeline, LUT de ventana, biquads, umbrales
+  nilm_features.h        espectro -> vector de features, con la corrección de f0 (solo rawfft)
   pipeline_config.json   lo mismo en JSON + nombres de features (para Python/docs)
   modelo.joblib          modelo sklearn + cfg + nombres + clases
   paridad.c / paridad    programa de paridad (si se corre test_paridad)
@@ -35,8 +36,9 @@ import joblib
 import numpy as np
 
 from .config import Config
-from .features import bins_rawfft, ventana_fft
-from .preprocess import disenar_filtro
+from .features import bins_rawfft, espectro, extraer_features, ventana_fft
+from .preprocess import disenar_filtro, preprocesar_ventanas
+from .segment import segmentar
 
 _HOJA = 65535
 
@@ -164,8 +166,9 @@ def config_pipeline(cfg: Config, fs: float, nombres: list, clases: list, umbrale
         "estrategia": cfg.estrategia, "n_armonicas": cfg.n_armonicas,
         "f0_estimar": cfg.f0_estimar, "armonica_tol_bins": cfg.armonica_tol_bins,
         "normalizar_forma": cfg.normalizar_forma, "bandas_hz": list(cfg.bandas_hz),
-        "rawfft_fmax": cfg.rawfft_fmax,
+        "rawfft_fmax": cfg.rawfft_fmax, "rawfft_f0": cfg.rawfft_f0,
         "rawfft_bins": [int(k) for k in bins_rawfft(cfg, fs)] if cfg.estrategia == "rawfft" else [],
+        "agrupar": dict(cfg.agrupar), "excluir_clases": list(cfg.excluir_clases),
         "clases": list(clases), "umbrales": [float(u) for u in np.broadcast_to(umbrales, (len(clases),))],
         "n_features": len(nombres), "features": list(nombres),
         "modelo": cfg.modelo, "multi_salida": cfg.multi_salida,
@@ -188,6 +191,11 @@ def generar_config_h(pc: dict) -> str:
     d("NILM_RAWFFT_FMAX", f"{pc['rawfft_fmax']!r}f"); d("NILM_RAWFFT_N_BINS", len(pc["rawfft_bins"]))
     if pc["rawfft_bins"]:
         d("NILM_RAWFFT_BIN_INI", pc["rawfft_bins"][0]); d("NILM_RAWFFT_BIN_FIN", pc["rawfft_bins"][-1])
+    d("NILM_RAWFFT_F0", int(pc["rawfft_f0"]))
+    df = pc["fs"] / pc["n_fft"]
+    d("NILM_DF", f"{df!r}f")
+    d("NILM_F0_BIN_INI", max(1, int(np.floor(0.8 * pc["f_red"] / df))))     # rango de búsqueda: ±20 % de f_red
+    d("NILM_F0_BIN_FIN", min(pc["n_fft"] // 2 - 1, int(np.ceil(1.2 * pc["f_red"] / df))))
     d("NILM_N_BANDAS", len(pc["bandas_hz"]) - 1)
     d("NILM_N_CLASES", len(pc["clases"])); d("NILM_N_FEATURES", pc["n_features"])
     d("NILM_N_SOS", len(pc["sos"]))
@@ -195,6 +203,9 @@ def generar_config_h(pc: dict) -> str:
     L.append("static const char *NILM_CLASES[NILM_N_CLASES] = {" + ", ".join(f'"{c}"' for c in pc["clases"]) + "};")
     L.append(_arr_c("NILM_UMBRALES", pc["umbrales"]))
     L.append(_arr_c("NILM_BANDAS_HZ", pc["bandas_hz"]))
+    if pc["rawfft_bins"]:
+        L.append("// Bins de la FFT que forman el vector de features, en orden")
+        L.append(_arr_c("NILM_RAWFFT_BINS", pc["rawfft_bins"], tipo="uint16_t", por_linea=16))
     L.append(f"static const char *NILM_VENTANA_NOMBRE = \"{pc['ventana']}\";")
     L.append(_arr_c("NILM_VENTANA_LUT", ventana_fft(pc["ventana"], pc["W"])))
     if pc["sos"]:
@@ -205,12 +216,73 @@ def generar_config_h(pc: dict) -> str:
     return "\n".join(L) + "\n"
 
 
+_FEATURES_H = r"""// Generado por nilm_pipeline.export -- NO editar a mano
+// Espectro -> vector de features. Reproduce features.py: estimar_f0 y _mag_alineada.
+#pragma once
+#include <math.h>
+#include "nilm_config.h"
+
+#define NILM_N_MAG (NILM_N_FFT / 2 + 1)
+
+// Frecuencia de red de una ventana: bin máximo cerca de f_red + interpolación parabólica en log.
+static float nilm_estimar_f0(const float *mag) {
+  int k = NILM_F0_BIN_INI;
+  for (int j = NILM_F0_BIN_INI + 1; j <= NILM_F0_BIN_FIN; j++) if (mag[j] > mag[k]) k = j;
+  const float a = logf(mag[k - 1] + 1e-12f), b = logf(mag[k] + 1e-12f), c = logf(mag[k + 1] + 1e-12f);
+  const float den = a - 2.0f * b + c;
+  float p = (fabsf(den) > 1e-12f) ? 0.5f * (a - c) / den : 0.0f;
+  if (p > 0.5f) p = 0.5f;
+  if (p < -0.5f) p = -0.5f;
+  return ((float)k + p) * NILM_DF;
+}
+
+// mag: NILM_N_MAG amplitudes |X|*2/suma(ventana). f: NILM_N_FEATURES floats.
+static void nilm_features_rawfft(const float *mag, float *f) {
+#if NILM_RAWFFT_F0
+  // Cada bin se lee donde está corrido: si f0 = 50.5 Hz, H20 está en 1010 Hz y se lee ahí.
+  const float factor = nilm_estimar_f0(mag) / NILM_F_RED;
+  for (int n = 0; n < NILM_N_FEATURES; n++) {
+    const float pos = (float)NILM_RAWFFT_BINS[n] * factor;
+    int i = (int)pos;
+    if (i > NILM_N_MAG - 2) i = NILM_N_MAG - 2;
+    float d = pos - (float)i;
+    if (d > 1.0f) d = 1.0f;
+    f[n] = (1.0f - d) * mag[i] + d * mag[i + 1];
+  }
+#else
+  for (int n = 0; n < NILM_N_FEATURES; n++) f[n] = mag[NILM_RAWFFT_BINS[n]];
+#endif
+}
+"""
+
+_PARIDAD_FEATURES_C = r"""// Test de paridad host: espectros (float32 binario) -> features (float32 binario).
+#include <stdio.h>
+#include "nilm_features.h"
+
+int main(int argc, char **argv) {
+  if (argc < 3) return 2;
+  FILE *in = fopen(argv[1], "rb"), *out = fopen(argv[2], "wb");
+  if (!in || !out) return 3;
+  static float mag[NILM_N_MAG], f[NILM_N_FEATURES];
+  while (fread(mag, sizeof(float), NILM_N_MAG, in) == NILM_N_MAG) {
+    nilm_features_rawfft(mag, f);
+    fwrite(f, sizeof(float), NILM_N_FEATURES, out);
+  }
+  fclose(in); fclose(out); return 0;
+}
+"""
+
+
 # ------------------------------------------------------------- export -----
 
 def exportar(modelo, cfg: Config, fs: float, nombres: list, clases: list, carpeta: str | Path,
              umbrales=None) -> dict:
     """Escribe nilm_modelo.h, nilm_config.h, pipeline_config.json y modelo.joblib.
     Devuelve dict con rutas, costo y tamaños en KB."""
+    no_exportable = [n for n, v in (("rawfft_norm", cfg.rawfft_norm), ("franjas", cfg.franjas),
+                                    ("filtro_corriente", cfg.filtro_corriente)) if v]
+    if no_exportable:
+        raise NotImplementedError(f"el export a C todavía no implementa: {no_exportable}. Son variantes experimentales.")
     carpeta = Path(carpeta).resolve()
     carpeta.mkdir(parents=True, exist_ok=True)
     umbrales = cfg.umbral if umbrales is None else umbrales
@@ -218,6 +290,8 @@ def exportar(modelo, cfg: Config, fs: float, nombres: list, clases: list, carpet
     modelo_h, costo = generar_modelo_h(modelo, clases)
     (carpeta / "nilm_modelo.h").write_text(modelo_h)
     (carpeta / "nilm_config.h").write_text(generar_config_h(pc))
+    if cfg.estrategia == "rawfft":
+        (carpeta / "nilm_features.h").write_text(_FEATURES_H)
     (carpeta / "pipeline_config.json").write_text(json.dumps(pc, indent=2, ensure_ascii=False))
     joblib.dump({"modelo": modelo, "cfg": cfg.to_dict(), "nombres": nombres, "clases": clases,
                  "fs": fs, "umbrales": pc["umbrales"]}, carpeta / "modelo.joblib")
@@ -249,6 +323,33 @@ int main(int argc, char **argv) {
   fclose(in); fclose(out); return 0;
 }
 """
+
+
+def test_paridad_features(carpeta: str | Path, senales: list, cfg: Config, fs: float, modelo, cc: str = "gcc") -> dict:
+    """Compila nilm_features.h y compara con Python, partiendo del mismo espectro: features y
+    decisiones del modelo. No cubre la FFT de esp-dsp, que hay que verificar en la placa."""
+    carpeta = Path(carpeta).resolve()
+    V, escala = preprocesar_ventanas(np.concatenate([segmentar(x, cfg.W, cfg.solape) for x in senales]), cfg)
+    mag, _ = espectro(V, cfg, fs)
+    F_ref, _ = extraer_features(V, escala, cfg, fs)
+    (carpeta / "paridad_features.c").write_text(_PARIDAD_FEATURES_C)
+    entrada, salida, binario = carpeta / "mag.bin", carpeta / "feat.bin", carpeta / "paridad_features"
+    mag.astype(np.float32).tofile(entrada)
+    comp = subprocess.run([cc, "-O2", "-std=c11", "-Wall", "-o", str(binario), str(carpeta / "paridad_features.c"), "-lm"],
+                          capture_output=True, text=True, cwd=carpeta)
+    if comp.returncode != 0:
+        raise RuntimeError(f"gcc falló:\n{comp.stderr}")
+    subprocess.run([str(binario), str(entrada), str(salida)], check=True, cwd=carpeta)
+    F_c = np.fromfile(salida, dtype=np.float32).reshape(F_ref.shape)
+    entrada.unlink()
+    salida.unlink()
+    dif = np.abs(F_c - F_ref)
+    P_c, P_ref = modelo.predict_proba(F_c), modelo.predict_proba(F_ref)
+    pc = json.loads((carpeta / "pipeline_config.json").read_text())
+    A_c, A_ref = P_c >= np.array(pc["umbrales"]), P_ref >= np.array(pc["umbrales"])
+    return {"n_ventanas": len(F_ref), "max_dif_feature_A": float(dif.max()),
+            "max_dif_relativa": float((dif / np.maximum(np.abs(F_ref), 1e-3)).max()), "max_dif_proba": float(np.abs(P_c - P_ref).max()),
+            "acuerdo_decisiones": float((A_c == A_ref).mean()), "acuerdo_vectores": float((A_c == A_ref).all(axis=1).mean())}
 
 
 def test_paridad(carpeta: str | Path, F: np.ndarray, P_ref: np.ndarray, umbrales=None,

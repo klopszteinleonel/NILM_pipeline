@@ -141,13 +141,43 @@ def _tiempo(V: np.ndarray, escala: np.ndarray) -> np.ndarray:
 def bins_rawfft(cfg: Config, fs: float) -> np.ndarray:
     """Índices de bin de la FFT usados por rawfft: 1..k con k·fs/n_fft <= rawfft_fmax."""
     freqs = np.fft.rfftfreq(cfg.n_fft_efectivo, d=1.0 / fs)
-    return np.where((freqs > 0) & (freqs <= cfg.rawfft_fmax))[0]
+    bins = (freqs > 0) & (freqs <= cfg.rawfft_fmax)
+    if cfg.rawfft_mascara != "todos":
+        bins &= mascara_armonica(freqs, cfg.f_red, "impares" if cfg.rawfft_mascara == "impares" else "armonicas")
+    return np.where(bins)[0]
+
+
+def mascara_armonica(freqs: np.ndarray, f_red: float, tipo: str = "armonicas") -> np.ndarray:
+    """Bins que caen sobre armónicas de f_red. La tolerancia crece con k, porque un error de
+    f0 de ±0.2 Hz corre la armónica k en k·0.2 Hz. H1 siempre queda incluida.
+    tipo: "todo" | "armonicas" | "pares" | "impares"."""
+    freqs = np.asarray(freqs, dtype=np.float64)
+    if tipo == "todo":
+        return np.ones(len(freqs), dtype=bool)
+    df = freqs[1] - freqs[0]
+    k = np.rint(freqs / f_red)
+    cerca = (k >= 1) & (np.abs(freqs - k * f_red) <= (1.5 + np.ceil(k * 0.2 / df)) * df)
+    if tipo == "pares":
+        cerca &= (k % 2 == 0) | (k == 1)
+    elif tipo == "impares":
+        cerca &= k % 2 == 1
+    return cerca
+
+
+def _mag_alineada(mag: np.ndarray, freqs: np.ndarray, f_red: float) -> np.ndarray:
+    """Magnitud remuestreada para que cada armónica caiga donde caería con f0 = f_red."""
+    f0 = estimar_f0(mag, freqs, f_red).astype(np.float64)
+    pos = np.arange(mag.shape[1], dtype=np.float64)[None, :] * (f0[:, None] / f_red)
+    i = np.clip(pos.astype(np.int64), 0, mag.shape[1] - 2)
+    d = np.clip(pos - i, 0.0, 1.0).astype(np.float32)
+    return (1 - d) * np.take_along_axis(mag, i, axis=1) + d * np.take_along_axis(mag, i + 1, axis=1)
 
 
 def nombres_features(cfg: Config, fs: float = 10000.0) -> list:
     if cfg.estrategia == "rawfft":
         df = fs / cfg.n_fft_efectivo
-        return [f"fft_{k * df:.2f}Hz" for k in bins_rawfft(cfg, fs)]
+        n = [f"fft_{k * df:.2f}Hz" for k in bins_rawfft(cfg, fs)]
+        return ["h1_A"] + n if cfg.rawfft_norm == "h1" else n
     nombres = ["rms_A", "pico_A", "cresta", "zcr", "curtosis", "asimetria", "h1_A"]
     suf = "_rel" if cfg.normalizar_forma else "_A"
     nombres += [f"h{k}{suf}" for k in range(2, cfg.n_armonicas + 1)]
@@ -169,7 +199,13 @@ def extraer_features(V: np.ndarray, escala: np.ndarray, cfg: Config, fs: float,
     nombres = nombres_features(cfg, fs)
 
     if cfg.estrategia == "rawfft":
+        if cfg.rawfft_f0:
+            mag = _mag_alineada(mag, freqs, cfg.f_red)
         F = mag[:, bins_rawfft(cfg, fs)] * escala[:, None]
+        if cfg.rawfft_norm == "h1":
+            cerca = (freqs > 0.8 * cfg.f_red) & (freqs < 1.2 * cfg.f_red)
+            h1 = mag[:, cerca].max(axis=1, keepdims=True) * escala[:, None]
+            F = np.hstack([h1, F / np.maximum(h1, 1e-4)])
         assert F.shape[1] == len(nombres), (F.shape, len(nombres))
         return F.astype(np.float32), nombres
 

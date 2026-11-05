@@ -2,7 +2,7 @@
 
 Pipeline de entrenamiento y experimentación para el medidor NILM monofásico
 (ESP32-S3 + MCP3204, 10 kHz, red 50 Hz). Clasifica firmas de corriente con
-FFT cruda (bins de 0–2 kHz) + Random Forest, con salida multi-label (qué cargas
+FFT cruda (bins hasta 3 kHz, con el eje corregido por la f0 estimada) + Random Forest, con salida multi-label (qué cargas
 están activas), y
 exporta el modelo a C con paridad exacta para correr en el borde.
 
@@ -70,6 +70,7 @@ evalúan una sola vez al final (`evaluar_test_congelado`).
 
 - `nilm_modelo.h` — un bosque binario por clase como arrays de nodos
   (12 bytes/nodo) + `nilm_predict_proba(f, out)` y `nilm_predict(f, activas)`.
+- `nilm_features.h` — del espectro al vector de features, con la corrección de f0.
 - `nilm_config.h` — `#define`s (fs, W, paso, n_fft…), LUT de la ventana,
   biquads del filtro (si hay), umbrales por clase, nombres de clases y features.
 - `pipeline_config.json` — lo mismo en JSON.

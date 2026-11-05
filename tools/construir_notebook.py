@@ -146,7 +146,7 @@ md("""
 **Lectura.**
 - **Sin saturación ni capturas dañadas**: máximo 22.3 A contra un riel de ±24.75 A. El loader tampoco reporta archivos inválidos ni faltantes.
 - **El offset es una marca del lugar**: unos -25 mA en `casa`, +118 en `depaleo`, +105 en `depamica`. Si llegara al modelo, aprendería a reconocer la casa. El pipeline lo quita por ventana, y esto confirma que hay que seguir haciéndolo. En `local` además varió dentro de la sesión: unos -200 mA en los dos aires (18:25 a 18:30), +27 mA a las 18:37 y ~+85 mA desde las 18:44. No depende del equipo, porque los dos aires dan lo mismo, y la causa no se conoce.
-- **La red se mueve**: 49.98 a 50.19 Hz entre capturas. A partir de la armónica ~26 (1.3 kHz) eso ya corre la línea un bin completo, así que una franja muy angosta y fija en alta frecuencia se perdería la armónica.
+- **La red se mueve**: 49.91 a 50.11 Hz entre capturas, ya descontado un sesgo del estimador de f0, que con esta ventana lee +0.074 Hz. A partir de la armónica ~43 (2.1 kHz) eso corre la línea un bin completo. En otra red o en otro momento puede moverse más: la Parte B mide lo que eso le hace al modelo.
 - **Atípicas**: se eliminó del dataset `lavarropa/20260922_180045`, que medía 81 mA contra ~1.35 A de mediana y parecía la máquina en pausa. Las `lavarropa` que quedan en la tabla, y un `aireinverter` de `casa` (0.77 A contra ~1.8 A), parecen cambios de estado reales. La A12 lo analiza con la firma completa.
 """)
 
@@ -396,7 +396,7 @@ md("""
 **Qué implica.**
 - **Una ráfaga no siempre es un solo estado**: `aireinverter` y `lavarropa` cambian dentro de la suya.
 - **Una clase no es una sola nube**: `lavarropa`, `heladera`, `aire` y `aireinverter` tienen varios regímenes. Conviene capturar y anotar el estado de la carga, y el tiempo desde que arrancó.
-- **El nivel no es una propiedad de la clase**: cada equipo tiene su potencia, y una casa nueva puede tener una potencia que el modelo nunca vio. Las mezclas sintéticas solo varían la amplitud ±5 %, así que vale probar rangos más amplios ahora que las resistivas están agrupadas.
+- **El nivel no es una propiedad de la clase**: cada equipo tiene su potencia, y una casa nueva puede tener una potencia que el modelo nunca vio. La Parte B probó rangos de amplitud más amplios: en las mezclas no cambian nada, y por captura suben las individuales pero bajan el exact en combinadas.
 - **No conviene borrar nada más**: se eliminó la captura de 81 mA de `lavarropa`, y lo que queda son estados que el modelo va a encontrar en una casa real.
 """)
 md("""
@@ -478,14 +478,15 @@ md("""
 - **Las armónicas pares**: tienen poca energía, pero son lo que más separa a `aire` y `lavarropa`. Un filtro solo por impares o solo por energía las perdería.
 - **El rango entre 1.2 y 3 kHz**: casi no tiene energía, pero sí separación. Un barrido anterior de la Parte B también favorecía 3 kHz sobre 2 kHz (F1 0.686 contra 0.668), aunque por poco más que el ruido entre semillas.
 
-**Costo real en el ESP32-S3.** La FFT calcula todos los bins igual: elegir franjas **no ahorra FFT**, sino memoria y tamaño de los árboles. Como estimación, una FFT radix-2 de 2048 puntos cuesta ~45 mil multiplicaciones reales y Goertzel ~2 mil por bin, así que Goertzel solo conviene por debajo de ~22 bins, lo cual queda corto incluso para H1-H20 con tolerancia. Además, un Random Forest ya elige sus variables, de modo que **sacar bins podría cambiar poco el resultado**. Hay que medirlo.
+**Costo real en el ESP32-S3.** La FFT calcula todos los bins igual: elegir franjas **no ahorra FFT**, sino memoria y tamaño de los árboles. Como estimación, una FFT radix-2 de 2048 puntos cuesta ~45 mil multiplicaciones reales y Goertzel ~2 mil por bin, así que Goertzel solo conviene por debajo de ~22 bins, lo cual queda corto incluso para H1-H20 con tolerancia. Además, un Random Forest ya elige sus variables, y la Parte B lo confirmó: **quedarse solo con las armónicas no empeora ni reduce el modelo, y las franjas angostas por clase empeoran**.
 
 **Lo que limita más que las franjas.** Una misma clase cambia entre casas más de lo que la separa de otra (A10), y en mezclas reales `heladera` y `luces` no tienen una armónica que las delate por sí sola (A9). Ninguna selección de frecuencias resuelve eso: hacen falta más unidades de cada aparato.
 
 **Próximos pasos posibles**
-1. Probar con validación por lugar los modelos con estas franjas, globales y por clase. Es posible porque cada clase ya tiene su propio bosque.
-2. Normalizar el eje a la f0 estimada, para reducir la tolerancia que hoy agranda las franjas en alta frecuencia.
-3. Sumar `aireinverter`, `heladera` y `luces` de otras casas.
+1. Sumar `aireinverter`, `heladera` y `luces` de otras casas.
+2. Capturar siempre corriente y tensión, para separar la distorsión de la red de la firma de la carga.
+
+Las franjas y la corrección de f0 ya se probaron en la sección 6 de la Parte B.
 """)
 
 md("""
@@ -509,9 +510,10 @@ sen, Y, G = ds.senales(), ds.y(), ds.grupos()
 
 md("""
 ## 2. Configuración base
-`Config` es la única fuente de verdad. Base: **FFT cruda** (solo los 614 bins directos de la FFT de W=2048 hasta 3 kHz),
-sin augment, 100 mezclas sintéticas por fold con fundamentales exactamente en fase (solo para entrenar), OvR de RandomForest 20×8.
+`Config` es la única fuente de verdad. Base (2026-11-04): **FFT cruda** (solo los 614 bins directos de la FFT de W=2048 hasta 3 kHz) **con el eje corregido por la f0 estimada** de cada ventana,
+sin augment, 300 mezclas sintéticas por fold con todas las combinaciones por igual (solo para entrenar), OvR de RandomForest 20×8.
 El test son siempre capturas reales; la validación por default es leave-one-lugar-out (casa nunca vista).
+**Las clases con pocas muestras se descartan hasta tener más** (menos de 3 capturas o menos de 2 ráfagas: hoy `hidro`, `secadorpelo` y `tele`).
 `AGRUPAR` fusiona clases físicamente indistinguibles (resistivas puras de ~6 A: misma amplitud, THD ≈ 0.02);
 dejalo vacío (`{}`) para evaluarlas por separado. `airecalor` se fusiona en `aire` (mismo equipo) y `parasito`
 se excluye (`EXCLUIR`): el standby se va a estimar como consumo base, no como clase.
@@ -582,10 +584,12 @@ se entrena sin un lugar y se evalúan las individuales **y** las combinadas de e
 - Bloques: `ind` (individuales), `comb` (combinadas reales), `todas` (ind + comb).
 - Niveles: por ventana; por captura (media de probabilidades, umbral 0.5); **clases vistas** = sin contar aparatos que solo
   existen en la casa de test (mide "reconocer unidades nuevas de clases conocidas"; es la fila a mirar mientras haya clases de un solo lugar).
-- Cada experimento se repite con varias semillas (`run_repetido`): con 59 combinadas el desvío entre semillas es del orden de
-  0.02–0.06, así que **una diferencia menor que el desvío no es evidencia**. Para comparar dos configs usá `comparar(a, b)` (pareado).
+- Cada experimento se repite con varias semillas (`run_repetido`): el desvío entre semillas es del orden de 0.02–0.05, así que
+  **una diferencia menor que el desvío no es evidencia**. Para comparar dos configs usá `comparar(a, b)` (pareado por semilla) y
+  `comparar_bootstrap(ds, a, b)`: su intervalo remuestrea ráfagas del test, porque el desvío entre semillas no mide cuánto depende el
+  resultado de qué ocasiones se midieron. Ninguno de los dos mide la variación entre casas, porque hay solo 4 lugares.
 - Referencia dentro de las casas conocidas: `cv="sgkf5"` agrupado por **ráfaga** (capturas casi idénticas nunca se reparten
-  entre train y test). El CV por captura que usábamos antes era optimista (ind exact 0.90 vs 0.55 por ráfaga).
+  entre train y test). El CV por captura que usábamos antes era optimista.
 - Los umbrales por clase (`+umbr`) empeoran bajo validación honesta: se usa umbral fijo 0.5.
 """)
 code("""
@@ -607,67 +611,106 @@ print("\\nReferencia dentro de casas conocidas (sgkf5 por ráfaga, 3 semillas):"
 """)
 
 md("""
-## 6. Barridos
-Cada variante es un `CFG.clonar(...)` corrido con `N_SEMILLAS_BARRIDO` semillas; el leaderboard guarda media y desvío.
-Métrica principal: `todas_s_f1_micro` (LOLO, clases vistas). Otros modelos (ExtraTrees, HGB, kNN, SVM, regresión logística,
-RF multi-output) ya se probaron y no superan al RF OvR 20×8; ver `AGENTS.md`.
+## 6. Barridos: hipótesis del EDA
+Cada variante es un `CFG.clonar(...)` corrido con `N_SEMILLAS_BARRIDO` semillas; el leaderboard guarda media y desvío. Cada grupo prueba algo que salió de la Parte A.
+La tabla agrega la diferencia contra la base y su intervalo del 95 % por ráfagas (`comparar_bootstrap`). Si el intervalo incluye el 0, la diferencia no es evidencia.
+
+Este barrido es corto a propósito, porque en Colab cada variante tarda varios minutos. El script `tools/experimentos_eda.py` corre el barrido completo de la auditoría (franjas por clase, forma, red simulada, etc.) con más semillas.
 """)
 code("""
 N_SEMILLAS_BARRIDO = 3
+BASE_ANTERIOR = dict(mix_sesgo_grande_chica=0.5, mix_total=100, rawfft_f0=False)     # sin contar el descarte de clases
 variantes = {
-    # --- mezclas sintéticas
-    "jitter_2hz":     CFG.clonar(mix_jitter_fase=14.4),   # ±2 Hz sobre un ciclo de 50 Hz ≡ ±14.4°
-    "fase_aleatoria": CFG.clonar(mix_fase="aleatoria"),
-    "sin_mix":        CFG.clonar(mix_habilitado=False),
-    "mix200":         CFG.clonar(mix_total=200),
-    # --- clases, features, ventana
-    "sin_agrupar":    CFG.clonar(agrupar={}),
-    "compact":        CFG.clonar(estrategia="compact"),
-    "fmax2000":       CFG.clonar(rawfft_fmax=2000.0),
-    "fmax4000":       CFG.clonar(rawfft_fmax=4000.0),
-    "W4096":          CFG.clonar(W=4096),
-    # --- filtros digitales (causales = implementables en el ESP32)
-    "hp20":           CFG.clonar(filtro="hp", filtro_fc=(20.0,), causal=True),
-    "notch50_q30":    CFG.clonar(filtro="notch", filtro_fc=(50.0,), notch_q=30.0, causal=True),
-    # --- data augmentation
-    "aug_blanco":     CFG.clonar(aug_n=2, ruido_tipo="blanco", snr_db=(20.0, 50.0)),
-    "aug_rosa":       CFG.clonar(aug_n=2, ruido_tipo="rosa", snr_db=(20.0, 50.0)),
-    "aug_impulsivo":  CFG.clonar(aug_n=2, ruido_tipo="impulsivo", snr_db=(20.0, 50.0)),
-    "aug_hum":        CFG.clonar(aug_n=2, hum50=True, hum_rel=0.05, snr_db=(60.0, 60.0)),
-    "aug_jitter_red": CFG.clonar(aug_n=2, jitter_red=True, jitter_hz=0.5, snr_db=(60.0, 60.0)),
-    "aug_escala10":   CFG.clonar(aug_n=2, escala=(0.9, 1.1), snr_db=(60.0, 60.0)),
-    # --- tamaño del RF
-    "rf50x12":        CFG.clonar(n_estimators=50, max_depth=12),
-    # --- combinación candidata a nueva base (lo mejor del barrido anterior)
-    "faseal+escala10": CFG.clonar(mix_fase="aleatoria", aug_n=2, escala=(0.9, 1.1), snr_db=(60.0, 60.0)),
+    # --- de dónde viene la base actual
+    "base_anterior":   CFG.clonar(**BASE_ANTERIOR),
+    "sin_eje_f0":      CFG.clonar(rawfft_f0=False),
+    "con_sesgo":       CFG.clonar(mix_sesgo_grande_chica=0.5),
+    "mix100":          CFG.clonar(mix_total=100),
+    # --- la otra candidata de la auditoría y sus partes
+    "rafaga_hoja5":    CFG.clonar(**BASE_ANTERIOR, mix_por_rafaga=True, hiperparams={"min_samples_leaf": 5}),
+    "por_rafaga":      CFG.clonar(mix_por_rafaga=True),
+    "hoja5":           CFG.clonar(hiperparams={"min_samples_leaf": 5}),
+    # --- franjas de frecuencia
+    "solo_armonicas":  CFG.clonar(rawfft_mascara="armonicas"),
+    "fmax2000":        CFG.clonar(rawfft_fmax=2000.0),
+    # --- nivel por equipo
+    "train_escala1.6": CFG.clonar(train_escala=(0.6, 1.6)),
+    # --- referencia
+    "sin_mix":         CFG.clonar(mix_habilitado=False),
 }
+PROYECCION = {}
+NO_COMPARABLES = ()
 reps = {"base": rep}
-print(f"{'variante':15s} {'todas_s':>13s} {'comb_s':>13s} {'comb_s exact':>13s} {'ind_s':>13s} {'nodos':>7s}")
+filas = []
 for nombre, c in variantes.items():
     r = run_repetido(ds, c, n_semillas=N_SEMILLAS_BARRIDO, leaderboard=LEADERBOARD, etiqueta=nombre)
     reps[nombre] = r
-    f = lambda k: f"{r.media.get(k, float('nan')):.3f}±{r.desvio.get(k, float('nan')):.3f}"
-    print(f"{nombre:15s} {f('todas_s_f1_micro'):>13s} {f('comb_s_f1_micro'):>13s} {f('comb_s_exact_match'):>13s} "
-          f"{f('ind_s_f1_micro'):>13s} {r.media['nodos_totales']:7.0f}")
+    f = {"variante": nombre, "todas_s": r.media["todas_s_f1_micro"], "comb_s": r.media["comb_s_f1_micro"],
+         "comb_exact": r.media["comb_s_exact_match"], "ind_s": r.media["ind_s_f1_micro"], "nodos": round(r.media["nodos_totales"])}
+    if nombre not in NO_COMPARABLES:
+        t = comparar_bootstrap(ds, rep, r, "todas", mapa_a=PROYECCION.get(nombre))
+        k = comparar_bootstrap(ds, rep, r, "comb", mapa_a=PROYECCION.get(nombre))
+        f.update(dif_todas=t["dif_f1"], ic_todas=t["ic95_f1"], dif_comb=k["dif_f1"], ic_comb=k["ic95_f1"], dif_exact=k["dif_exact"], ic_exact=k["ic95_exact"])
+    filas.append(f)
+    print(f"{nombre:18s} todas {f['todas_s']:.3f}  comb {f['comb_s']:.3f}  exact {f['comb_exact']:.3f}  nodos {f['nodos']}", flush=True)
+tabla_barrido = pd.DataFrame(filas).set_index("variante").round(3).sort_values("dif_todas", ascending=False)
+display(tabla_barrido)
 """)
 code("""
+# Solo filas de este dataset: el leaderboard puede traer corridas viejas si se persiste entre sesiones
 lb = cargar_leaderboard(LEADERBOARD, ordenar_por="todas_s_f1_micro")
+lb = lb[lb["manifest"] == ds.manifest_hash[:10]]
 cols = ["etiqueta", "nombre", "todas_s_f1_micro", "todas_s_f1_micro_std", "comb_s_f1_micro", "comb_s_exact_match",
         "ind_s_f1_micro", "nodos_totales", "n_semillas"]
 display(lb[[c for c in cols if c in lb.columns]].head(20))
 plots.plot_leaderboard(lb, y="todas_s_f1_micro", y2="comb_s_f1_micro")
 plt.show()
-# comparación pareada de la mejor variante contra la base (mismas semillas)
-mejor_var = next(e for e in lb["etiqueta"] if e in reps and e != "base")
-print(f"\\ncomparar(base, {mejor_var}) con {N_SEMILLAS_BARRIDO} semillas pareadas:")
-base_n = run_repetido(ds, CFG, n_semillas=N_SEMILLAS_BARRIDO) if N_SEMILLAS != N_SEMILLAS_BARRIDO else rep
-print(comparar(base_n, reps[mejor_var], ("todas_s_f1_micro", "comb_s_f1_micro", "comb_s_exact_match", "ind_s_f1_micro")))
+""")
+md("""
+### Robustez a la frecuencia de red
+Los datos se midieron con la red entre 49.91 y 50.11 Hz. Acá se simula otra frecuencia en las capturas de test. `eje_f0` estima la f0 de cada ventana y corrige el eje.
+""")
+code("""
+filas = {}
+for nombre, c in (("base", CFG), ("sin_eje_f0", variantes["sin_eje_f0"])):
+    filas[nombre] = {f"{d:+.1f} Hz": run_repetido(ds, c.clonar(test_f0_hz=d), n_semillas=N_SEMILLAS_BARRIDO).media["todas_s_f1_micro"]
+                     for d in (-0.5, 0.0, 0.5)}
+display(pd.DataFrame(filas).T.round(3))
+""")
+md("""
+### Resultados de la auditoría (dataset `dfe60d02ca`, 2026-11-04)
+De acá salió la base actual, `sesgo0_mix300` + `eje_f0`, a la que después se le sacó `tele` por tener una sola ráfaga. Esta tabla es previa a ese descarte. Validación por lugar, clases vistas. Base anterior: todas 0.708, individuales 0.743, combinadas 0.683, combinadas exact 0.277, 9.2 k nodos (10 semillas). Entre paréntesis, el intervalo del 95 % por ráfagas.
+
+| Candidata (10 semillas) | Δ todas | Δ combinadas | Δ exact comb. | Δ exact ind. | Nodos | F1 con f0 ±0.5 Hz | Export |
+|---|---|---|---|---|---|---|---|
+| Base anterior | - | - | - | - | 9.2 k | 0.58 / 0.46 | sí |
+| `rafaga_hoja5` | +0.028 (0.012, 0.045) | +0.031 (0.009, 0.053) | +0.016 (-0.026, 0.066) | +0.014 (-0.010, 0.044) | 7.4 k | 0.62 / 0.56 | sí |
+| `sesgo0_mix300` | +0.033 (0.006, 0.059) | +0.063 (0.029, 0.097) | +0.108 (0.021, 0.209) | -0.054 (-0.115, -0.004) | 15.5 k | 0.65 / 0.55 | sí |
+| **`sesgo0_mix300` + `eje_f0` (base actual)** | +0.024 (-0.002, 0.050) | +0.050 (0.015, 0.086) | +0.094 (0.009, 0.188) | -0.050 (-0.106, -0.003) | 15.2 k | 0.73 / 0.73 | sí |
+| `rafaga_hoja5` + `eje_f0` | +0.012 (-0.002, 0.029) | +0.012 (-0.008, 0.033) | +0.016 (-0.031, 0.074) | +0.011 (-0.017, 0.042) | 7.3 k | 0.71 / 0.70 | sí |
+
+**Lectura.**
+- **Lo que más limitaba eran las mezclas**: 91 % tenían una carga grande (66 % en las reales), y `lavarropa+luces`, la combinación real más común, era apenas 1 %. Cubrir todas las combinaciones por igual y con más mezclas sube claramente las combinadas (`sesgo0_mix300`), aunque baja algo las individuales.
+- **Las mejoras no se suman**: `rafaga_hoja5` junto con `sesgo0_mix300` da menos que cada una por separado (todas +0.016).
+- **La base es frágil ante la frecuencia de red**: corrigiendo el eje con la f0 estimada, el F1 casi no cambia en ±0.5 Hz. Es lo más importante para un producto real, y en condiciones nominales cuesta poco.
+
+**Hipótesis del EDA que no funcionaron.**
+- **Franjas angostas por clase** (A14): caen, exact -0.14. Con franjas amplias da lo mismo que la base. Solo armónicas no pierde nada, pero tampoco reduce los nodos.
+- **Solo impares**: bajan las individuales. Confirma que las pares importan.
+- **Features de forma + H1**: empeoran. El nivel sigue siendo información útil.
+- **Escala más amplia**: en las mezclas no cambia nada. Por captura sube las individuales (+0.06 con ±2.5×) y baja exact en combinadas.
+- **Distorsión de red simulada**, **alinear con f0** y **armónicas al azar**: efectos chicos.
+- **Filtro por corriente**: no aporta. Con factor 0.25 no cambia nada, y con 0.5 empeora apenas.
+
+**Una corrección**: fusionar `tele+luces` parecía sumar +0.044, pero comparado en las mismas clases son +0.022.
+
+**Cuidado.** Se probaron unas 50 variantes sobre los mismos 4 lugares, así que alguna mejora puede ser azar de selección, y estos intervalos no incluyen la variación entre casas. Una casa nueva, sin mirar durante los barridos, es lo único que confirmaría estos números.
 """)
 
 md("""
 ## 7. Evaluación del elegido
-Elegí `MEJOR` a mano: solo cambiá la base si `comparar` muestra una mejora mayor al desvío y en todas (o casi todas) las semillas.
-Si no, quedate con la base. Las matrices por clase son del LOLO (casa no vista), con umbral 0.5.
+Elegí `MEJOR` a mano: solo cambiá la base si la mejora es mayor al desvío, en casi todas las semillas, y su intervalo de `comparar_bootstrap` excluye el 0.
+Si no, quedate con la base. `franjas`, `forma_h1` y `filtro_corriente` todavía no se pueden exportar a C. Las matrices por clase son del LOLO (casa no vista), con umbral 0.5.
 """)
 code("""
 MEJOR = CFG            # o: Config.from_json(lb.iloc[0]["config"])
@@ -688,7 +731,7 @@ plt.show()
 
 md("""
 ## 8. Export al ESP32-S3 y test de paridad
-Entrena con todas las individuales (+ mezclas + augment), genera `nilm_modelo.h`, `nilm_config.h`, `pipeline_config.json` y `modelo.joblib`, y compila un programa C en el host que debe reproducir `predict_proba` de sklearn (diferencia < 1e-5).
+Entrena con todas las individuales (+ mezclas + augment), genera `nilm_modelo.h`, `nilm_config.h`, `nilm_features.h`, `pipeline_config.json` y `modelo.joblib`. Compila en el host un programa C que debe reproducir `predict_proba` de sklearn (diferencia < 1e-5), y otro que del espectro saca las features, corrección de f0 incluida, sin cambiar ninguna decisión.
 """)
 code("""
 modelo, nombres_f, clases = entrenar_final(ds, MEJOR)
@@ -699,8 +742,12 @@ F_all, _, _, _ = armar_conjunto(sen, Y, G, MEJOR, fs)
 paridad = test_paridad(CARPETA_EXPORT, F_all, predecir_proba(modelo, F_all, len(clases)))
 print(paridad)
 assert paridad["paridad_ok"], "el C exportado NO reproduce a sklearn: no flashear"
+# El espectro -> features en C (corrección de f0 incluida). Parte del mismo espectro: no cubre la FFT de esp-dsp.
+paridad_f = test_paridad_features(CARPETA_EXPORT, sen, MEJOR, fs, modelo)
+print(paridad_f)
+assert paridad_f["acuerdo_decisiones"] == 1.0, "las features en C cambian decisiones del modelo: no flashear"
 rob = robustez_snr(modelo, ds, MEJOR)
-print("robustez SNR:", {k: round(v, 3) for k, v in rob.items()})
+print("robustez SNR (sobre datos de entrenamiento: mide degradación relativa):", {k: round(v, 3) for k, v in rob.items()})
 plots.plot_robustez(rob)
 plt.show()
 print("archivos en", CARPETA_EXPORT, ":", sorted(os.listdir(CARPETA_EXPORT)))
@@ -710,7 +757,7 @@ md("""
 ## 9. Test congelado (una sola vez, al final)
 Reservá desde el principio uno o más lugares/sesiones en `Config.test_congelado`: `run_experiment` los ignora durante
 todos los barridos y solo esta celda los usa. Si se mira este resultado para elegir configuraciones, deja de ser un test.
-Con los datos actuales (3 lugares) conviene esperar a tener una casa nueva y congelarla entera.
+Con los datos actuales (4 lugares) conviene esperar a tener una casa nueva y congelarla entera: todas las decisiones de la Parte B se tomaron mirando estas 4.
 """)
 code("""
 CONGELADO = ()          # ej. ("casa_nueva",) — nombres de lugar o de sesión

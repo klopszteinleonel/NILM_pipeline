@@ -20,7 +20,8 @@ import json
 from dataclasses import asdict, dataclass, field, replace
 
 # Campos que se serializan como lista en JSON y hay que reconvertir a tupla
-_CAMBIOS_TUPLA = ("filtro_fc", "mix_k", "mix_escala", "snr_db", "escala", "bandas_hz", "test_congelado", "excluir_clases")
+_CAMBIOS_TUPLA = ("filtro_fc", "mix_k", "mix_escala", "snr_db", "escala", "bandas_hz", "test_congelado", "excluir_clases",
+                  "train_escala")
 
 ESTRATEGIAS = ("compact", "rawfft")
 VENTANAS = ("hann", "hamming", "blackman", "flattop", "rect")
@@ -45,8 +46,8 @@ class Config:
                                     # (misma amplitud, THD ~0) se evalúan y exportan como una
     excluir_clases: tuple = ()      # clases que se sacan del problema: se descartan sus
                                     # capturas y toda combinada que las contenga
-    min_rafagas: int = 1            # ídem por ráfagas (ocasiones independientes); con 1 sola
-                                    # ráfaga una clase no se puede validar honestamente
+    min_rafagas: int = 2            # ídem por ráfagas (ocasiones independientes). Decisión del usuario: una
+                                    # clase con pocas muestras se descarta hasta tener más
     min_capturas: int = 3           # clases con menos capturas individuales se EXCLUYEN
                                     # (sus capturas y las combinadas que las contienen):
                                     # con 1–2 capturas no se pueden aprender ni evaluar
@@ -74,17 +75,30 @@ class Config:
     # ---------------- mezcla sintética ----------------
     mix_habilitado: bool = True
     mix_k: tuple = (2, 3)           # (min, max) cargas simultáneas
-    mix_total: int = 100            # combinadas sintéticas para train (por fold)
+    mix_total: int = 300            # combinadas sintéticas para train (por fold). Con 7 clases hay 56
+                                    # combinaciones de 2-3 cargas: con 100 no llegan a 2 por combinación
     mix_test: bool = False          # mezclas sintéticas también como bloque de test
                                     # (apagado: las combinadas reales son el test)
     mix_test_total: int = 100       # combinadas sintéticas para test (si mix_test)
     mix_escala: tuple = (0.95, 1.05)  # escalado de amplitud por carga (±5 % ~ red)
     mix_misma_clase: bool = False   # permitir 2 cargas de la misma clase
-    mix_sesgo_grande_chica: float = 0.5  # fracción de mixes que fuerzan grande+chica
+    mix_sesgo_grande_chica: float = 0.0  # fracción de mixes que fuerzan grande+chica. Con 0.5 el 91 % de las
+                                    # mezclas tenía una carga grande (66 % en las combinadas reales)
     mix_fase: str = "alineada"      # "alineada": fundamentales exactamente en fase, como
                                     # cargas reales colgadas de la misma red; "aleatoria"
     mix_jitter_fase: float = 0.0    # grados de desfase aleatorio (±) entre cargas; 0 en la
                                     # base. Referencia: ±2 Hz sobre un ciclo de 50 Hz ≡ ±14.4°
+    mix_alinear_f0: bool = False    # estimar la fase con la f0 de cada captura y no con f_red fija
+                                    # (con f_red el error de fase mediano es 12.5°, hasta 40°)
+    mix_armonicas_azar: bool = False  # fase propia al azar en cada armónica de cada carga:
+                                    # H1 sigue alineada; desde H2 suman sin relación, como en las reales
+    mix_por_rafaga: bool = False    # elegir primero la ráfaga y después la captura: una ocasión con
+                                    # muchas capturas no domina las mezclas
+    max_por_rafaga: int = 0         # capturas por ráfaga en train (0 = todas): baja los casi duplicados
+    train_escala: tuple | None = None  # factor de amplitud por captura de train (log-uniforme):
+                                    # cada equipo tiene su potencia. Ej. (0.6, 1.6)
+    train_red_pct: float = 0.0      # distorsión de red simulada en train: H3..H13 hasta este % de H1,
+                                    # para no aprender la red de cada casa
 
     # ---------------- augmentación (solo train) ----------------
     aug_n: int = 0                  # copias aumentadas por ventana (0 = sin augment:
@@ -111,6 +125,12 @@ class Config:
     normalizar_forma: bool = True   # vector armónico como H_k/H1 (las absolutas quedan)
     bandas_hz: tuple = (0.0, 100.0, 300.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0)
                                     # bordes de bandas para energía fraccional
+    rawfft_mascara: str = "todos"   # "todos" | "armonicas" | "impares": qué bins de rawfft se usan
+    rawfft_f0: bool = True          # corrige el eje de frecuencia con la f0 estimada de cada ventana:
+                                    # H_k cae en el mismo bin aunque la red se corra (sin esto, F1 0.46 a -0.5 Hz)
+    rawfft_norm: str | None = None  # None | "h1": bins relativos a H1 + H1 como feature (forma + nivel)
+    franjas: dict = field(default_factory=dict)  # clase -> (fmin, fmax, "todo"|"armonicas"|"pares"|
+                                    # "impares"): bins que ve el bosque de esa clase (H1 siempre)
     rawfft_fmax: float = 3000.0     # rawfft = SOLO los bins directos de la FFT (sin DC) hasta
                                     # esta frecuencia. Con W=2048 y fs=10 kHz: 614 bins de
                                     # 4.88 Hz. Es exactamente lo que calcula el borde.
@@ -125,6 +145,8 @@ class Config:
     hiperparams: dict = field(default_factory=dict)  # extras para el estimador
     class_weight: str | None = "balanced"
     umbral: float = 0.5             # umbral de decisión multi-label (filas "por captura")
+    filtro_corriente: float = 0.0   # >0: una clase no puede estar activa si H1 medida < este factor ×
+                                    # P5 de H1 de esa clase en train (la corriente no alcanza)
     umbral_criterio: str = "f1"     # cómo se eligen los umbrales por clase (+umbr):
                                     # "f1" = cada clase maximiza su F1 (independiente)
                                     # "exact" = búsqueda conjunta que maximiza el exact match
@@ -141,6 +163,8 @@ class Config:
     test_congelado: tuple = ()      # lugares o sesiones reservados: run_experiment los
                                     # ignora; solo los usa evaluar_test_congelado()
     seed: int = 42
+    test_escala: float = 1.0        # solo robustez: escala de amplitud aplicada a las capturas de test
+    test_f0_hz: float = 0.0         # solo robustez: corrimiento de la frecuencia de red en test
 
     def __post_init__(self):
         e = []
@@ -198,6 +222,14 @@ class Config:
             e.append("ruido_tipo debe ser blanco, rosa o impulsivo")
         if self.notch_q <= 0:
             e.append("notch_q debe ser > 0")
+        if self.rawfft_mascara not in ("todos", "armonicas", "impares"):
+            e.append("rawfft_mascara debe ser todos, armonicas o impares")
+        if self.rawfft_norm not in (None, "h1"):
+            e.append("rawfft_norm debe ser None o 'h1'")
+        if self.franjas and (self.rawfft_norm or self.estrategia != "rawfft" or self.multi_salida != "ovr"):
+            e.append("franjas requiere estrategia rawfft, multi_salida ovr y rawfft_norm None")
+        if self.train_escala is not None and not (0 < self.train_escala[0] <= self.train_escala[1]):
+            e.append("train_escala debe ser (min, max) con 0 < min <= max")
         if e:
             raise ValueError("Config inválida:\n  - " + "\n  - ".join(e))
 
@@ -255,7 +287,12 @@ class Config:
         ms = "_nativo" if self.multi_salida == "nativo" else ""
         uc = "_uexact" if self.umbral_criterio == "exact" else ""
         cv = self.cv if self.cv == "lolo" else f"{self.cv}-{self.cv_grupo}"
-        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{ms}{mix}{fase}{aug}{fil}{agr}{uc}_{cv}"
+        ext = "".join(s for s, v in (("_mascara" + self.rawfft_mascara, self.rawfft_mascara != "todos"), ("_f0", self.rawfft_f0),
+                                     ("_normh1", self.rawfft_norm), ("_franjas", self.franjas), ("_mixf0", self.mix_alinear_f0),
+                                     ("_mixarm", self.mix_armonicas_azar), ("_mixraf", self.mix_por_rafaga),
+                                     (f"_max{self.max_por_rafaga}", self.max_por_rafaga), ("_trescala", self.train_escala),
+                                     (f"_red{self.train_red_pct:g}", self.train_red_pct), (f"_fc{self.filtro_corriente:g}", self.filtro_corriente)) if v)
+        return f"{est}_W{self.W}_{self.ventana}_{self.modelo}{arb}{ms}{mix}{fase}{aug}{fil}{agr}{uc}{ext}_{cv}"
 
 
 # Preset de referencia (baseline del plan)

@@ -17,10 +17,10 @@ from .evaluate import (metricas_multilabel, agregar_por_grupo, matrices_por_clas
                        umbrales_optimos, umbrales_optimos_exact, importancias, reporte, reporte_combinaciones)
 from .train import (Resultado, construir_modelo, predecir_proba, costo_modelo,
                     armar_conjunto, armar_conjunto_train, dividir, run_experiment,
-                    Repetido, run_repetido, comparar, evaluar_test_congelado, preparar_dataset,
+                    Repetido, run_repetido, comparar, comparar_bootstrap, evaluar_test_congelado, preparar_dataset,
                     entrenar_final, registrar, cargar_leaderboard, robustez_snr)
 
-from .export import exportar, test_paridad, config_pipeline
+from .export import exportar, test_paridad, test_paridad_features, config_pipeline
 from . import plots
 
 __version__ = "0.6.0"

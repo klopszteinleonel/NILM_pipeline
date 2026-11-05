@@ -25,6 +25,7 @@ from __future__ import annotations
 import numpy as np
 
 from .config import Config
+from .mix import f0_captura
 
 
 def copias_por_ventana(Yw: np.ndarray, cfg: Config) -> np.ndarray:
@@ -90,6 +91,30 @@ def aumentar_ventana(v: np.ndarray, cfg: Config, rng: np.random.Generator, fs: f
     sigma = rms / (10.0 ** (snr / 20.0))
     v = v + _ruido(cfg.ruido_tipo, W, sigma, rng)
     return v.astype(np.float32)
+
+
+def perturbar_capturas(senales: list, cfg: Config, rng: np.random.Generator, fs: float) -> list:
+    """Variación por captura de train, sin agregar copias.
+    train_escala: otro equipo de la misma clase tiene otra potencia.
+    train_red_pct: otra casa tiene otra distorsión de tensión, que entra como H3..H13 en la corriente."""
+    if cfg.train_escala is None and not cfg.train_red_pct:
+        return senales
+    out = []
+    for x in senales:
+        x = np.asarray(x, dtype=np.float32)
+        if cfg.train_red_pct:
+            f0 = f0_captura(x, fs, cfg.f_red)
+            ac = x.astype(np.float64) - x.mean()
+            t = np.arange(len(x)) / fs
+            a1 = 2 * np.abs(np.mean(ac * np.exp(-2j * np.pi * f0 * t)))
+            for k in (3, 5, 7, 9, 11, 13):
+                amp = a1 * rng.uniform(0, cfg.train_red_pct / 100)
+                ac = ac + amp * np.sin(2 * np.pi * k * f0 * t + rng.uniform(0, 2 * np.pi))
+            x = (ac + x.mean()).astype(np.float32)
+        if cfg.train_escala is not None:
+            x = x * np.float32(np.exp(rng.uniform(*np.log(cfg.train_escala))))
+        out.append(x)
+    return out
 
 
 def aumentar_ventanas(X: np.ndarray, Yw: np.ndarray, Gw: np.ndarray, idx: np.ndarray,

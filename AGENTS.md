@@ -92,6 +92,8 @@ El filtro (`preprocesar_captura`) va sobre la captura completa antes de segmenta
   duracion, muestras, formato, k, bytes, datos[]}` (1 s típica = 10000 muestras).
   `canal=0/magnitud="corriente"/unidad="A"` (CH0) o `canal=1/"tension"/"V"` (CH1).
   Capturas viejas no tienen esos 3 campos → se asumen corriente.
+  Desde 2026-11-04 `capturar.py --equipo --estado` agrega esos campos a I y V (texto; en combinadas, separados
+  por coma en el orden de `categoria`, `-` si no aplica). Las agrega el cliente, no el nodo; `data.py` todavía no los usa.
 - Desde 2026-09-20 el firmware muestrea CH1 (tensión): comando `"canal":"i"|"v"|"iv"`;
   con `iv` ambos canales se leen en el mismo tick del timer (sincronizados,
   ~20 µs entre sí) y llegan como dos objetos JSON separados por `\n`.
@@ -352,6 +354,27 @@ Fallas en casa nueva: luces F1 0.36/0.37, heladera en combinadas 0.14,
 aireinverter (2 ráfagas, casa+depamica) arrastra falsos positivos de heladera,
 lavarropa y tele; tele (1 sola ráfaga, casa) aparece como falso positivo.
 Cuello de botella: pocas unidades distintas por clase, no el modelo.
+
+## Auditoría de la Parte B contra el EDA (2026-11-04, dataset dfe60d02ca, 297 capturas)
+**Base actual (decisión del usuario, 2026-11-04): `Config(agrupar=..., excluir_clases=("parasito",))` = mix_sesgo_grande_chica=0,
+mix_total=300, rawfft_f0=True, min_rafagas=2.** Regla del usuario: una clase con pocas muestras se descarta hasta tener más
+(hoy hidro, secadorpelo y tele). Antes de sacar tele, LOLO 10 semillas: todas_s 0.732, ind 0.729, comb 0.734, comb exact 0.371, 15.2 k nodos.
+`nilm_features.h` implementa espectro -> features en C con la corrección de f0; `test_paridad_features`: 100 % de decisiones iguales
+partiendo del mismo espectro. Falta integrarlo al firmware (hoy el nodo solo captura) y verificar en la placa.
+`estimar_f0` lee +0.074 Hz con W=2048 (constante: no afecta la corrección); la red real en los datos fue 49.91–50.11 Hz.
+
+`tools/experimentos_eda.py` reproduce el barrido; `comparar_bootstrap` da el IC del 95 % remuestreando ráfagas de test
+(`mapa_a` proyecta la base cuando cambian las clases). Las opciones nuevas de `Config` están apagadas: la base no cambió.
+Base LOLO (10 semillas): todas_s 0.708, ind 0.743, comb 0.683, comb exact 0.277, 9.2 k nodos.
+- `mix_por_rafaga` + `min_samples_leaf=5`: todas +0.028 (0.012, 0.045), 7.4 k nodos, exportable.
+- `mix_sesgo_grande_chica=0` + `mix_total=300`: comb +0.063 (0.029, 0.097), comb exact +0.108, ind exact -0.054, 15.5 k nodos.
+  Causa: las mezclas tenían 91 % con carga grande (66 % en las reales) y lavarropa+luces era 1 %.
+- Las dos juntas rinden menos que cada una por separado: las mejoras no se suman.
+- `rawfft_f0` (eje corregido con f0): con f0 ±0.5 Hz la base cae a F1 0.58/0.46; con sesgo0+mix300+f0 queda en 0.73/0.73.
+  `exportar` todavía no lo implementa (tampoco `rawfft_norm`, `franjas`, `filtro_corriente`).
+- No funcionaron: franjas angostas por clase (exact -0.14), solo impares, forma+H1, escala amplia en mezclas, filtro por corriente.
+- tele+luces en clases proyectadas: +0.022 (no +0.044). La mezcla alineada ya reproduce la suma real de armónicas.
+- ~50 variantes sobre los mismos 4 lugares: hay riesgo de selección; hace falta una casa nueva congelada para confirmar.
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:

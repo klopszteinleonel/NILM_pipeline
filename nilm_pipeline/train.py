@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from sklearn.base import clone
 from sklearn.ensemble import (ExtraTreesClassifier, HistGradientBoostingClassifier,
                               RandomForestClassifier)
 from sklearn.linear_model import LogisticRegression
@@ -45,12 +46,12 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-from .augment import aumentar_ventanas, copias_por_ventana
+from .augment import aumentar_ventanas, copias_por_ventana, perturbar_capturas
 from .config import Config
 from .data import TIPO_COMBINADA, Dataset
 from .evaluate import (agregar_por_grupo, importancias, metricas_multilabel, umbrales_optimos,
                        umbrales_optimos_exact)
-from .features import extraer_features, nombres_features
+from .features import extraer_features, mascara_armonica, nombres_features
 from .mix import sintetizar_combinadas
 from .preprocess import preprocesar_captura, preprocesar_ventanas
 from .segment import segmentar_dataset
@@ -60,7 +61,36 @@ _ARBOLES = ("rf", "et")
 
 # ----------------------------------------------------------------- modelo --
 
-def construir_modelo(cfg: Config, seed: int | None = None):
+class OvRFranjas:
+    """Un bosque binario por clase, cada uno sobre su propia franja de frecuencias."""
+
+    def __init__(self, base, franjas: dict, clases: list, nombres: list, f_red: float):
+        self.base, self.franjas, self.clases, self.f_red = base, franjas, clases, f_red
+        self.freqs = np.array([float(n[4:-2]) for n in nombres])
+
+    def _mascara(self, clase: str) -> np.ndarray:
+        fmin, fmax, tipo = self.franjas.get(clase, (0.0, np.inf, "todo"))
+        m = (self.freqs >= fmin) & (self.freqs <= fmax) & mascara_armonica(self.freqs, self.f_red, tipo)
+        return m | (np.abs(self.freqs - self.f_red) <= 1.5 * (self.freqs[1] - self.freqs[0]))
+
+    def fit(self, X: np.ndarray, Y: np.ndarray):
+        self.mascaras_, self.estimators_, self.constante_ = [], [], []
+        for j, c in enumerate(self.clases):
+            m = self._mascara(c)
+            self.mascaras_.append(m)
+            constante = len(np.unique(Y[:, j])) < 2
+            self.constante_.append(float(Y[0, j]) if constante else None)
+            self.estimators_.append(None if constante else clone(self.base).fit(X[:, m], Y[:, j]))
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        P = np.zeros((len(X), len(self.clases)), dtype=np.float32)
+        for j, (e, m, k) in enumerate(zip(self.estimators_, self.mascaras_, self.constante_)):
+            P[:, j] = k if e is None else e.predict_proba(X[:, m])[:, 1]
+        return P
+
+
+def construir_modelo(cfg: Config, seed: int | None = None, clases: list | None = None, nombres: list | None = None):
     seed = cfg.seed if seed is None else seed
     hp = dict(cfg.hiperparams)
     if cfg.modelo == "rf":
@@ -89,6 +119,8 @@ def construir_modelo(cfg: Config, seed: int | None = None):
         if cfg.modelo in _ARBOLES:
             return base
         warnings.warn(f"{cfg.modelo} no soporta multi-output nativo; se usa OvR")
+    if cfg.franjas:
+        return OvRFranjas(base, cfg.franjas, clases, nombres, cfg.f_red)
     return OneVsRestClassifier(base, n_jobs=1)
 
 
@@ -115,7 +147,7 @@ def costo_modelo(modelo) -> dict:
         e = pendientes.pop()
         if hasattr(e, "tree_"):
             arboles.append(e)
-        else:
+        elif e is not None:
             pendientes += list(getattr(e, "estimators_", []))
     return {
         "n_arboles": len(arboles),
@@ -145,6 +177,7 @@ def armar_conjunto_train(senales: list, Y: np.ndarray, grupos: np.ndarray, cfg: 
                          rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
     """Como armar_conjunto pero con augment. Las copias aumentadas heredan la
     escala (factor de normalización) de su ventana original."""
+    senales = perturbar_capturas(senales, cfg, rng, fs)
     senales = [preprocesar_captura(x, fs, cfg) for x in senales]
     X, Yw, Gw, idx = segmentar_dataset(senales, Y, grupos, cfg)
     V, escala = preprocesar_ventanas(X, cfg)
@@ -157,14 +190,62 @@ def armar_conjunto_train(senales: list, Y: np.ndarray, grupos: np.ndarray, cfg: 
 
 
 def mezclas_de(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list, cfg: Config,
-               rng: np.random.Generator, total: int, prefijo: str, fs: float):
+               rng: np.random.Generator, total: int, prefijo: str, fs: float, rafagas: np.ndarray | None = None):
     """Mixes sintéticos desde un subconjunto de capturas, o None si no hay
     al menos 2 clases con individuales."""
     Yi = np.asarray(Y)
     individuales = Yi[Yi.sum(axis=1) == 1]
     if total <= 0 or len(np.unique(individuales.argmax(axis=1))) < 2:
         return None
-    return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo, fs)
+    return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo, fs, rafagas)
+
+
+def _perturbar_test(senales: list, cfg: Config, fs: float) -> list:
+    """Solo robustez: simula otra tensión de red (escala) u otra frecuencia de red en el test."""
+    if cfg.test_escala == 1.0 and not cfg.test_f0_hz:
+        return senales
+    out = []
+    for x in senales:
+        x = np.asarray(x, dtype=np.float64)
+        if cfg.test_f0_hz:
+            x = np.interp(np.arange(len(x)) * (1 + cfg.test_f0_hz / cfg.f_red), np.arange(len(x)), x)
+        out.append((x * cfg.test_escala).astype(np.float32))
+    return out
+
+
+def _limitar_por_rafaga(idx: np.ndarray, rafagas: np.ndarray, maximo: int, rng: np.random.Generator) -> np.ndarray:
+    """Se queda con hasta `maximo` capturas al azar de cada ráfaga."""
+    if maximo <= 0:
+        return idx
+    salida = []
+    for r in np.unique(rafagas[idx]):
+        g = idx[rafagas[idx] == r]
+        salida.append(g if len(g) <= maximo else rng.choice(g, maximo, replace=False))
+    return np.sort(np.concatenate(salida))
+
+
+def _h1_de_features(F: np.ndarray, nombres: list) -> np.ndarray:
+    """Amplitud de la fundamental por ventana, a partir del vector de features."""
+    if "h1_A" in nombres:
+        return F[:, nombres.index("h1_A")]
+    j = [i for i, n in enumerate(nombres) if n.startswith("fft_") and 40.0 <= float(n[4:-2]) <= 60.0]
+    return F[:, j].max(axis=1)
+
+
+def _minimos_h1(F: np.ndarray, Yw: np.ndarray, nombres: list, cfg: Config) -> np.ndarray | None:
+    """Corriente mínima creíble por clase: factor × P5 de H1 entre sus ventanas individuales de train."""
+    if not cfg.filtro_corriente:
+        return None
+    h1, solas = _h1_de_features(F, nombres), Yw.sum(axis=1) == 1
+    return np.array([cfg.filtro_corriente * np.percentile(h1[solas & (Yw[:, j] == 1)], 5) if (solas & (Yw[:, j] == 1)).any() else 0.0
+                     for j in range(Yw.shape[1])])
+
+
+def _proba(modelo, F: np.ndarray, n_clases: int, minimos: np.ndarray | None, nombres: list) -> np.ndarray:
+    P = predecir_proba(modelo, F, n_clases)
+    if minimos is not None:
+        P = P * (_h1_de_features(F, nombres)[:, None] >= minimos)
+    return P
 
 
 def preparar_dataset(ds: Dataset, cfg: Config, verbose: bool = True,
@@ -285,7 +366,8 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
     reales = ds.filtrar(TIPO_COMBINADA)
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()
-    sen_r, Y_r, G_r = reales.senales(), reales.y(), reales.grupos()
+    sen_r, Y_r, G_r = _perturbar_test(reales.senales(), cfg, fs), reales.y(), reales.grupos()
+    R = base.rafagas()
 
     bloques = {b: {"P": [], "Y": [], "grupos": [], "M": []} for b in ("ind", "mix")}
     F_comb = None
@@ -294,29 +376,31 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
     folds = dividir(base, reales, cfg)
     for k, (tr, te, te_c) in enumerate(folds):
         rng = np.random.default_rng(cfg.seed + k)
+        tr = _limitar_por_rafaga(tr, R, cfg.max_por_rafaga, rng)
         sen_tr, Y_tr, G_tr = [sen[i] for i in tr], Y[tr], G[tr]
         vistas = Y_tr.sum(axis=0) > 0
 
         # --- train: individuales + mezclas (+ augment)
         m = mezclas_de(sen_tr, Y_tr, G_tr, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0,
-                       f"mixtr{k}", fs)
+                       f"mixtr{k}", fs, R[tr])
         if m is not None:
             sen_tr, Y_tr, G_tr = sen_tr + m.senales, np.vstack([Y_tr, m.Y]), np.concatenate([G_tr, m.grupos])
         F_tr, Yw_tr, _, nombres = armar_conjunto_train(sen_tr, Y_tr, G_tr, cfg, fs, rng)
-        modelo = construir_modelo(cfg, cfg.seed + k)
+        modelo = construir_modelo(cfg, cfg.seed + k, clases, nombres)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             modelo.fit(F_tr, Yw_tr)
+        minimos = _minimos_h1(F_tr, Yw_tr, nombres, cfg)
         costo = costo_modelo(modelo)
         imps.append(importancias(modelo, nombres))
 
         # --- test: individuales
         n_te = 0
         if len(te):
-            sen_te, Y_te, G_te = [sen[i] for i in te], Y[te], G[te]
+            sen_te, Y_te, G_te = _perturbar_test([sen[i] for i in te], cfg, fs), Y[te], G[te]
             F_te, Yw_te, Gw_te, _ = armar_conjunto(sen_te, Y_te, G_te, cfg, fs)
             n_te = len(F_te)
-            for kk, v in zip(("P", "Y", "grupos", "M"), (predecir_proba(modelo, F_te, C), Yw_te, Gw_te,
+            for kk, v in zip(("P", "Y", "grupos", "M"), (_proba(modelo, F_te, C, minimos, nombres), Yw_te, Gw_te,
                                                           np.repeat(vistas[None], len(F_te), axis=0))):
                 bloques["ind"][kk].append(v)
             if cfg.mix_habilitado and cfg.mix_test:
@@ -333,7 +417,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
                 F_comb, Yw_r, Gw_r, _ = armar_conjunto(sen_r, Y_r, G_r, cfg, fs)
                 P_sum = np.zeros((len(F_comb), C)); n_ev = np.zeros(len(F_comb)); M_c = np.ones((len(F_comb), C), bool)
             sel = np.isin(Gw_r, G_r[te_c])
-            P_sum[sel] += predecir_proba(modelo, F_comb[sel], C); n_ev[sel] += 1; M_c[sel] &= vistas
+            P_sum[sel] += _proba(modelo, F_comb[sel], C, minimos, nombres); n_ev[sel] += 1; M_c[sel] &= vistas
 
         if verbose:
             print(f"  fold {k + 1}/{len(folds)}: train {len(F_tr)} ventanas, test ind {n_te}, "
@@ -429,6 +513,69 @@ def comparar(a: Repetido, b: Repetido, metricas=("todas_c_f1_micro", "comb_c_exa
     return "\n".join(lineas)
 
 
+def _conteos_por_captura(rep: Repetido, bloque: str, clases_destino: list | None, mapa: dict | None):
+    """TP, FP, FN y acierto exacto por captura, promediados entre semillas (clases vistas).
+    `mapa` proyecta las predicciones a otro conjunto de clases: clase -> grupo (P = máximo, Y = OR)
+    o clase -> None para sacarla. Así dos experimentos con clases distintas se comparan en lo mismo."""
+    filas = {}
+    for r in rep.resultados:
+        d = r.bloques[bloque]
+        P, Y, G = agregar_por_grupo(d["P"], d["Y"], d["grupos"])
+        M, _, _ = agregar_por_grupo(d["M"].astype(np.float32), d["Y"], d["grupos"])
+        M = M > 0.5
+        clases = r.clases
+        if clases_destino is not None and list(clases_destino) != list(clases):
+            mapa = mapa or {}
+            P2, Y2, M2 = [np.zeros((len(P), len(clases_destino))) for _ in range(3)]
+            for j, c in enumerate(clases):
+                g = mapa.get(c, c)
+                if g is None:
+                    continue
+                i = list(clases_destino).index(g)
+                P2[:, i], Y2[:, i], M2[:, i] = np.maximum(P2[:, i], P[:, j]), np.maximum(Y2[:, i], Y[:, j]), np.maximum(M2[:, i], M[:, j])
+            P, Y, M = P2, Y2.astype(np.uint8), M2 > 0.5
+        Y2, P2, keep = _solo_vistas(Y, P, M.astype(np.float32))
+        pred = P2 >= r.cfg.umbral
+        tp, fp, fn = (pred & (Y2 == 1)).sum(1), (pred & (Y2 == 0)).sum(1), (~pred & (Y2 == 1)).sum(1)
+        for i in np.where(keep)[0]:
+            filas.setdefault(G[i], []).append((tp[i], fp[i], fn[i], fp[i] + fn[i] == 0))
+    return {g: np.mean(v, axis=0) for g, v in filas.items()}
+
+
+def comparar_bootstrap(ds: Dataset, a: Repetido, b: Repetido, bloque: str = "todas", n: int = 4000, seed: int = 0,
+                       mapa_a: dict | None = None, mapa_b: dict | None = None) -> dict:
+    """Diferencia b−a con intervalo del 95 %, remuestreando RÁFAGAS del test dentro de cada lugar.
+
+    El desvío entre semillas solo mide el azar del entrenamiento. Este intervalo mide además cuánto
+    depende el resultado de qué ocasiones cayeron en el test: es el error que importa con tan pocas.
+    No incluye la variación entre casas, porque hay solo 4 lugares. Para clases distintas, usar mapa_*."""
+    destino = b.resultados[0].clases if mapa_a else (a.resultados[0].clases if mapa_b else None)
+    ca, cb = _conteos_por_captura(a, bloque, destino, mapa_a), _conteos_por_captura(b, bloque, destino, mapa_b)
+    regs = {r.grupo: r for r in ds.registros}
+    grupos = sorted(set(ca) & set(cb) & set(regs))
+    raf = np.array([regs[g].rafaga for g in grupos])
+    A, B = np.array([ca[g] for g in grupos]), np.array([cb[g] for g in grupos])
+    unicas, inv = np.unique(raf, return_inverse=True)
+    lugar = np.array([r.split("_")[0] for r in unicas])
+    SA, SB = np.zeros((len(unicas), 4)), np.zeros((len(unicas), 4))
+    np.add.at(SA, inv, A); np.add.at(SB, inv, B)
+    n_cap = np.bincount(inv).astype(float)
+    f1 = lambda S: 2 * S[..., 0] / np.maximum(2 * S[..., 0] + S[..., 1] + S[..., 2], 1e-9)
+    rng = np.random.default_rng(seed)
+    pesos = np.zeros((n, len(unicas)))
+    for L in np.unique(lugar):
+        i = np.where(lugar == L)[0]
+        pesos[:, i] = rng.multinomial(len(i), np.full(len(i), 1 / len(i)), size=n)
+    d_f1 = f1(pesos @ SB) - f1(pesos @ SA)
+    d_ex = (pesos @ SB[:, 3] - pesos @ SA[:, 3]) / (pesos @ n_cap)
+    total = lambda S: (f1(S.sum(0)), S[:, 3].sum() / n_cap.sum())
+    (fa, ea), (fb, eb) = total(SA), total(SB)
+    return {"capturas": len(grupos), "rafagas": len(unicas), "f1_a": float(fa), "f1_b": float(fb), "dif_f1": float(fb - fa),
+            "ic95_f1": tuple(np.percentile(d_f1, [2.5, 97.5]).round(3).tolist()), "p_mejora_f1": float((d_f1 > 0).mean()),
+            "exact_a": float(ea), "exact_b": float(eb), "dif_exact": float(eb - ea),
+            "ic95_exact": tuple(np.percentile(d_ex, [2.5, 97.5]).round(3).tolist()), "p_mejora_exact": float((d_ex > 0).mean())}
+
+
 def evaluar_test_congelado(ds: Dataset, cfg: Config, umbrales=None, verbose: bool = True) -> dict:
     """Entrena con todo lo que NO está en cfg.test_congelado y evalúa UNA VEZ sobre
     lo congelado (individuales y combinadas). Usar solo al final, con la config
@@ -443,11 +590,13 @@ def evaluar_test_congelado(ds: Dataset, cfg: Config, umbrales=None, verbose: boo
     te = [r for r in ds_all.registros if en_test(r)]
     sen, Y, G = tr.senales(), tr.y(), tr.grupos()
     rng = np.random.default_rng(cfg.seed)
-    m = mezclas_de(sen, Y, G, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixcong", fs)
+    idx = _limitar_por_rafaga(np.arange(len(sen)), tr.rafagas(), cfg.max_por_rafaga, rng)
+    sen, Y, G = [sen[i] for i in idx], Y[idx], G[idx]
+    m = mezclas_de(sen, Y, G, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixcong", fs, tr.rafagas()[idx])
     if m is not None:
         sen, Y, G = sen + m.senales, np.vstack([Y, m.Y]), np.concatenate([G, m.grupos])
-    F, Yw, _, _ = armar_conjunto_train(sen, Y, G, cfg, fs, rng)
-    modelo = construir_modelo(cfg)
+    F, Yw, _, nombres = armar_conjunto_train(sen, Y, G, cfg, fs, rng)
+    modelo = construir_modelo(cfg, clases=clases, nombres=nombres)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         modelo.fit(F, Yw)
@@ -478,11 +627,13 @@ def entrenar_final(ds: Dataset, cfg: Config, verbose: bool = True):
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], ds.clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()
     rng = np.random.default_rng(cfg.seed)
-    m = mezclas_de(sen, Y, G, ds.clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixfin", fs)
+    idx = _limitar_por_rafaga(np.arange(len(sen)), base.rafagas(), cfg.max_por_rafaga, rng)
+    sen, Y, G = [sen[i] for i in idx], Y[idx], G[idx]
+    m = mezclas_de(sen, Y, G, ds.clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixfin", fs, base.rafagas()[idx])
     if m is not None:
         sen, Y, G = sen + m.senales, np.vstack([Y, m.Y]), np.concatenate([G, m.grupos])
     F, Yw, _, nombres = armar_conjunto_train(sen, Y, G, cfg, fs, rng)
-    modelo = construir_modelo(cfg)
+    modelo = construir_modelo(cfg, clases=ds.clases, nombres=nombres)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         modelo.fit(F, Yw)
