@@ -53,8 +53,8 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
     (0/1) en vez de promediar fracciones de hoja → probabilidades distintas
     a sklearn; `loadable` cuantiza a int16. Umbrales de nodo redondeados hacia
     abajo a float32 para preservar `f32 <= thr64`.
-  - `eda.py` — Parte A del notebook (EDA, no entrena): inventario, forma de onda, `fft_por_clase`
-    (media y desvío, por ventanas o señal completa), firmas acumuladas y distribución/outliers.
+  - `eda.py` — Parte A del notebook (EDA, no entrena): inventario, forma de onda y `fft_por_clase`
+    (media y desvío, por ventanas o señal completa; `plot_fft_superpuestas` admite rangos con `paso`).
 
 ## Flujo por fold (para train.py)
 ```
@@ -385,6 +385,8 @@ Base LOLO (10 semillas): todas_s 0.708, ind 0.743, comb 0.683, comb exact 0.277,
 - Forma: tres familias (resistivas 2-4 dB, motores 7-10 dB, electrónica 5-9 dB). aireinverter, luces y heladera cambian más entre
   lugares que lo que las separa de la clase más parecida. Misma pava en dos casas: 4.2 dB de forma y 0.1 % de corriente.
 - PCA sobre 614 bins: 5 componentes = 90 %, 10 = 95 %. H1 de combinadas suma lineal (1.02); armónicas casi en cuadratura (0.97).
+- Firmas acumuladas y distribución/outliers (también en 7916c79 o antes): sin etiquetas claramente erróneas; lavarropa, heladera, aire y
+  aireinverter tienen varios regímenes; heladera baja de corriente con el tiempo (0.59→0.44 A, 0.72→0.61 A).
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:

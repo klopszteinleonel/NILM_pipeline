@@ -88,7 +88,7 @@ md("""
 
 Usa las mismas clases que el modelo: resistivas y `airecalor` agrupadas, y sin las clases con pocas muestras.
 
-**Unidad de análisis.** Las capturas tomadas seguidas, de una misma carga, son casi duplicados. En `luces` cada ráfaga es otra cantidad de lámparas encendidas, y el cambio puede tardar menos que la pausa que separa ráfagas, así que ahí también se corta cuando el nivel salta más de 1.5 dB entre capturas.
+**Ráfagas.** Las capturas tomadas seguidas, de una misma carga, cuentan como una ráfaga. En `luces` cada ráfaga es otra cantidad de lámparas encendidas, y el cambio puede tardar menos que la pausa que separa ráfagas, así que ahí también se corta cuando el nivel salta más de 1.5 dB entre capturas.
 
 **Una clase reúne equipos de distinta potencia.** Cada equipo consume lo suyo, así que una diferencia de corriente dentro de una clase es esperable y no es, por sí sola, una anomalía.
 
@@ -199,129 +199,46 @@ md("""
 
 md("""
 ## A5. Todas las clases superpuestas
-Arriba, el rango completo. Abajo, el detalle hasta 500 Hz, donde está la mayor parte de la diferencia. Cada clase tiene siempre el mismo color.
+Cada clase tiene siempre el mismo color. Primero el rango completo y después por rangos de 1000 Hz y de 500 Hz. Cada rango tiene su propia escala vertical, porque si no H1 aplasta a todo lo demás.
 """)
 code("""
 eda.plot_fft_superpuestas(F, escala="log")
 plt.show()
 """)
 code("""
+eda.plot_fft_superpuestas(F, escala="log", paso=1000.0)
+plt.show()
+""")
+code("""
+eda.plot_fft_superpuestas(F, escala="log", paso=500.0)
+plt.show()
+""")
+code("""
 eda.plot_fft_superpuestas(F, escala="lin")
 plt.show()
 """)
-md("""
-**Lectura.**
-- **En lineal casi todo lo separa H1**: la corriente ordena las clases, pero los equipos de cada una se solapan, y nada garantiza ese orden en otra casa.
-- **En log, las armónicas pares y los bins entre armónicas separan familias**. En 100 Hz, `aire` está unas 100 veces por encima de `resistiva` (850 contra 7 mA). Entre armónicas, `aireinverter` y `lavarropa` quedan muy por encima de las demás.
-- **En impares altas casi todas se tocan**: ahí se pisan `luces`, `resistiva` y `heladera`, y las bandas se solapan. Es coherente con que `heladera` y `luces` sean las clases más difíciles.
-""")
-
-md("""
-## A6. Firmas acumuladas por clase
-Se superponen los espectros de **todas las ventanas de cada clase**. El color indica qué fracción de las ventanas tiene esa amplitud en esa frecuencia, de modo que la "nube" muestra la firma estadística y no un único ejemplo. Línea oscura: mediana de la clase. Línea gris: piso de ruido (P99 de `nada`).
-""")
 code("""
-eda.plot_firmas_acumuladas(E, fmax=3000.0)
+eda.plot_fft_superpuestas(F, escala="lin", paso=1000.0)
 plt.show()
 """)
-md("""
-**Lectura.**
-- **Casi toda la información está en el peine de armónicas de 50 Hz.** Entre dientes la señal cae al piso, salvo en `aireinverter` y parte de `lavarropa`.
-- **Las armónicas de `resistiva` son la red, no la carga**: con la misma pava, en `depaleo` y `depamica`, H1 es igual (12.24 y 12.23 A), pero H3 da 0.11 y 0.19 A, y H5 0.17 y 0.09 A. Cambian con la casa, así que no conviene aprender de ellas.
-- **`aireinverter`**: nube ancha y un lomo de 1.5 a 3.5 kHz, mucho más fuerte en el equipo de `casa`.
-""")
-
-md("""
-## A7. Distribución dentro de cada clase y outliers
-Cada muestra es un espectro de muchas dimensiones, así que un histograma por variable diría poco. La firma de cada captura se resume en sus 40 primeras armónicas (en dB y recortadas al piso de ruido), y se compara contra **el resto de su clase, sin su propia ráfaga**. La diferencia se separa en dos preguntas:
-
-- **Nivel**: ¿consume más o menos? Es la diferencia en H1. Con 6 dB, la corriente es el doble o la mitad.
-- **Forma**: ¿tiene otra firma? Es la diferencia de H_k/H1, solo en armónicas que superan el piso.
-
-**Outlier no significa error.** Se revisan tres situaciones distintas:
-1. **Una captura que cambia dentro de su ráfaga** (6 dB de nivel u 8 dB de forma contra capturas tomadas segundos antes): cambio de estado o accidente.
-2. **Una ráfaga entera que difiere del resto de su clase**: es esperable, porque suele ser otro equipo u otra configuración. Sirve para ver la variedad real de la clase, no para buscar errores.
-3. **Una captura más cerca de otra clase que de la suya**: candidata a etiqueta dudosa.
-""")
 code("""
-D = eda.distribucion_muestras(E)
-eda.plot_distribucion_clases(D)
+eda.plot_fft_superpuestas(F, escala="lin", paso=500.0)
 plt.show()
-""")
-md("""
-**Lectura.**
-- **Las más dispersas en nivel**: `luces` (de -8 a +14 dB, según cuántas lámparas haya), `lavarropa` (de -11 a +9 dB, según la etapa), `aire` (hasta +8 dB, un equipo de `casa`) y `resistiva` (hasta -7 dB, el `horno` de `local`).
-- **La más dispersa en forma**: `aireinverter`, con todas sus capturas sobre el umbral.
-- **En `resistiva`, la forma no indica un problema**: sus ~4 dB vienen de las armónicas de la red y de que están cerca del piso.
-""")
-md("""
-### Nivel contra forma, y qué revisar
-Cada punto es una captura. Las líneas son los umbrales y los números identifican las capturas de la primera tabla. La segunda tabla lista las ráfagas enteras que se apartan de su clase.
-""")
-code("""
-eda.plot_nivel_forma(D)
-plt.show()
-print("Capturas para revisar:")
-display(eda.muestras_atipicas(D))
-print("Ráfagas que se apartan del resto de su clase:")
-display(eda.rafagas_atipicas(D))
-""")
-md("""
-### Mapa de muestras: en qué se diferencia cada captura
-Cada fila es una captura y cada columna una armónica, contra el centro de su clase. Las líneas separan ráfagas, y a la derecha van los números de la tabla. Una banda vertical indica una armónica que varía en toda la clase; un bloque horizontal, una captura o ráfaga distinta.
-""")
-code("""
-eda.plot_mapa_muestras(E, D)
-plt.show()
-""")
-md("""
-### Todas las capturas en un mismo plano
-PCA ajustado sobre ráfagas y aplicado a todas las capturas. En gris están las demás clases, para ver dónde cae cada una respecto del resto.
-""")
-code("""
-eda.plot_pca_muestras(E, D)
-plt.show()
-""")
-md("""
-**Lectura.**
-
-**No aparece ninguna etiqueta claramente errónea.** Casi todo lo marcado son estados reales de la carga:
-
-| Clase | Qué se ve | Interpretación |
-|---|---|---|
-| `lavarropa` | 0.43 A (#13), 2.6 A con THD 0.13 (#12), de 2.8 a 4.4 A dentro de una misma captura (#11) | etapas del ciclo |
-| `aireinverter` | en `casa`, 0.77, 1.7 y 1.8 A con formas distintas (#5 a #10); en `depamica`, un grupo compacto | el inverter cambia de régimen, y sus dos equipos no se parecen |
-| `heladera` | ~0.43 A con THD 0.19, y ~0.6-0.7 A con THD 0.12-0.17 | la corriente baja con el tiempo: 0.59 a 0.44 A en `depaleo` y 0.72 a 0.61 A en `local` |
-| `aire` | en `casa`, un equipo de 8.5 A y otro que sube de 2.8 a 4.2 A en 3 minutos | equipos de distinta potencia, y un régimen que todavía no se estabilizó |
-| `luces` | de 0.10 a 0.37 A en `depaleo` y hasta 0.88 A en `casa` | distinta cantidad de lámparas encendidas |
-
-**Sobre las capturas "más cerca de otra clase".**
-- `aire` #1 a #4 son el modo calor. Es casi un empate, con menos de 1 dB de diferencia: no alcanza para sospechar de ellas.
-- `aireinverter` #5, #9 y #10 no tienen una zona propia: sus equipos caen lejos entre sí.
-
-**Qué implica.**
-- **Una ráfaga no siempre es un solo estado**: `aireinverter` y `lavarropa` cambian dentro de la suya.
-- **Una clase no es una sola nube**: `lavarropa`, `heladera`, `aire` y `aireinverter` tienen varios regímenes. Conviene capturar y anotar el estado de la carga, y el tiempo desde que arrancó (`capturar.py --equipo --estado`).
-- **El nivel no es una propiedad de la clase**: cada equipo tiene su potencia, y una casa nueva puede tener una potencia que el modelo nunca vio.
-- **No conviene borrar nada más**: lo que queda son estados que el modelo va a encontrar en una casa real.
-""")
-md("""
-### Las combinadas reales
-La misma vista, tomando cada combinación como una categoría. Interesa porque son el test: una etiqueta mal puesta acá afectaría directamente las métricas.
-""")
-code("""
-DC = eda.distribucion_muestras(E, bloque="comb")
-eda.plot_distribucion_clases(DC)
-plt.show()
-display(eda.muestras_atipicas(DC))
-display(eda.rafagas_atipicas(DC))
 plt.rcdefaults()     # la Parte B usa el estilo por defecto de matplotlib
 """)
 md("""
-**Lectura.**
-- **La dispersión viene de `lavarropa`**: `lavarropa+luces` y `heladera+lavarropa+luces` van de -14 a +9 dB, porque el ciclo sigue cambiando dentro de la combinada. Todas sus marcas son compatibles con eso.
-- **`aireinverter+heladera+luces` es la de forma más variable** (8 dB de mediana), coherente con los regímenes del inverter.
-- **El resto es compacto**, y no aparece ninguna captura que sugiera una etiqueta equivocada. Ojo: esta vista compara cada captura con su propia combinación, así que no detectaría una combinación entera mal etiquetada.
+**Lectura.** Qué se separa en cada rango:
+
+| Rango | Qué se ve |
+|---|---|
+| 0 a 500 Hz | H1 ordena por corriente, pero los equipos de cada clase se solapan. En las pares bajas se abren las familias: a 100 Hz, `aire` 851, `aireinverter` 217, `lavarropa` 121, `heladera` 25, `resistiva` 7 y `luces` 4 mA |
+| 500 a 1000 Hz | En las impares casi todas se tocan. En las pares siguen arriba `aire`, `aireinverter` y `lavarropa` (a 700 Hz: 8, 17 y 15 mA, contra menos de 1 mA del resto) |
+| 1000 a 2000 Hz | `aire` se apaga. Quedan `lavarropa` en las pares (a 1500 Hz: 4 mA contra 0.3 a 1 mA) y `aireinverter` (13 a 17 mA, casi plano) |
+| 2000 a 3000 Hz | Solo se separan claramente `aireinverter` (12 mA a 2500 Hz) y, algo menos, `lavarropa` (1.3 mA). El resto queda en el piso de ~0.3 mA, salvo los picos impares |
+
+- **Las pares separan familias en casi todo el rango**, y las impares casi no: ahí se pisan `luces`, `resistiva` y `heladera`, coherente con que `heladera` y `luces` sean las clases más difíciles.
+- **`aireinverter` tiene contenido en todas las frecuencias**, también entre armónicas. Con solo dos equipos, y muy distintos entre sí, puede ser propio de ellos y no de la clase.
+- **En lineal, los paneles que incluyen H1 quedan aplastados** por ella. Para ver lo demás sirven los otros rangos, o la escala logarítmica.
 """)
 
 md("""
