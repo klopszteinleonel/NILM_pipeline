@@ -53,8 +53,8 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
     (0/1) en vez de promediar fracciones de hoja → probabilidades distintas
     a sklearn; `loadable` cuantiza a int16. Umbrales de nodo redondeados hacia
     abajo a float32 para preservar `f32 <= thr64`.
-  - `eda.py` — Parte A del notebook (EDA, no entrena): inventario, forma de onda y `fft_por_clase`
-    (media y desvío, por ventanas o señal completa; `plot_fft_superpuestas` admite rangos con `paso`).
+  - `eda.py` — Parte A del notebook (EDA, no entrena): inventario, forma de onda, `fft_por_clase` (media y desvío; por defecto
+    señal completa + f0) y `comparar_combinada` (real, individuales y sintética). Los `plot_*` admiten rangos con `paso`.
 
 ## Flujo por fold (para train.py)
 ```
@@ -373,7 +373,11 @@ Base LOLO (10 semillas): todas_s 0.708, ind 0.743, comb 0.683, comb exact 0.277,
 - `rawfft_f0` (eje corregido con f0): con f0 ±0.5 Hz la base cae a F1 0.58/0.46; con sesgo0+mix300+f0 queda en 0.73/0.73.
   `exportar` todavía no lo implementa (tampoco `rawfft_norm`, `franjas`, `filtro_corriente`).
 - No funcionaron: franjas angostas por clase (exact -0.14), solo impares, forma+H1, escala amplia en mezclas, filtro por corriente.
-- tele+luces en clases proyectadas: +0.022 (no +0.044). La mezcla alineada ya reproduce la suma real de armónicas.
+- tele+luces en clases proyectadas: +0.022 (no +0.044).
+- La mezcla alineada solo reproduce la suma de armónicas EN PROMEDIO (cociente contra suma lineal 0.77 vs 0.75). Combinación por combinación,
+  su H3 es la suma directa de las individuales, y en las reales con luces hay cancelación: heladera+luces +12 dB, aire+luces +7 dB, calefon+luces +4 dB,
+  aireinverter+lavarropa +9 dB (sintética − real); aire+calefon 0 dB. Hipótesis: alinear por la corriente ignora el ángulo respecto de V; probar alinear
+  por fase de tensión con las capturas nuevas. El piso de las sintéticas de 2 cargas queda ~2.5 dB más alto.
 - ~50 variantes sobre los mismos 4 lugares: hay riesgo de selección; hace falta una casa nueva congelada para confirmar.
 
 ## Hallazgos del EDA que ya no están en el notebook (limpieza 2026-11-05; código en el commit 7916c79)

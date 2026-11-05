@@ -15,8 +15,9 @@ from matplotlib.lines import Line2D
 from scipy.signal import windows
 
 from .config import Config
-from .data import TIPO_COMBINADA, Dataset
+from .data import TIPO_COMBINADA, TIPO_INDIVIDUAL, Dataset, _timestamp
 from .features import _mag_alineada, armonicas, espectro, estimar_f0
+from .mix import combinar
 from .preprocess import preprocesar_ventanas
 from .segment import segmentar
 
@@ -210,7 +211,17 @@ class FFTClases:
         return [c for c in self.media if c != PISO_ETIQUETA]
 
 
-def fft_por_clase(ds: Dataset, modo: str = "ventanas", alinear_f0: bool = True, W: int = 2048, solape: float = 0.5) -> FFTClases:
+def _fft_senal(x: np.ndarray, n_fft: int, fs: float, f_red: float, alinear_f0: bool = True) -> tuple:
+    """Espectro de una captura completa, con ventana Hann y completada con ceros hasta n_fft."""
+    x = np.asarray(x, dtype=np.float64)
+    x = x - x.mean()
+    w = windows.hann(len(x), sym=False)
+    mag = (2 * np.abs(np.fft.rfft(x * w, n=n_fft)) / w.sum())[None, :].astype(np.float32)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / fs).astype(np.float32)
+    return (_mag_alineada(mag, freqs, f_red) if alinear_f0 else mag), freqs
+
+
+def fft_por_clase(ds: Dataset, modo: str = "senal", alinear_f0: bool = True, W: int = 2048, solape: float = 0.5) -> FFTClases:
     """Media y desvío de la FFT de todas las muestras individuales de cada clase.
 
     modo="ventanas": un espectro por ventana de W muestras, lo mismo que recibe el modelo.
@@ -229,13 +240,10 @@ def fft_por_clase(ds: Dataset, modo: str = "ventanas", alinear_f0: bool = True, 
         if modo == "ventanas":
             V, _ = preprocesar_ventanas(segmentar(r.datos, W, solape), cfg)
             mag, freqs = espectro(V, cfg, fs)
+            if alinear_f0:
+                mag = _mag_alineada(mag, freqs, cfg.f_red)
         else:
-            x = r.datos.astype(np.float64) - float(r.datos.mean())
-            w = windows.hann(len(x), sym=False)
-            mag = (2 * np.abs(np.fft.rfft(x * w, n=n_fft)) / w.sum())[None, :].astype(np.float32)
-            freqs = np.fft.rfftfreq(n_fft, 1.0 / fs).astype(np.float32)
-        if alinear_f0:
-            mag = _mag_alineada(mag, freqs, cfg.f_red)
+            mag, freqs = _fft_senal(r.datos, n_fft, fs, cfg.f_red, alinear_f0)
         m = mag.astype(np.float64)
         picos = np.array([m[:, np.abs(freqs - k * cfg.f_red) <= 8.0].max(axis=1) for k in range(1, N_ARMONICAS + 1)]).T
         d = orden.setdefault(c, {"s1": 0.0, "s2": 0.0, "n": 0, "pico": 0.0})
@@ -270,11 +278,16 @@ def comparar_modos_fft(ds: Dataset) -> tuple:
     return pd.DataFrame(filas).T.round({"resolucion_Hz": 2, "piso_mA": 2, "perdida_H10_dB": 1, "perdida_H20_dB": 1, "perdida_H40_dB": 1}), F
 
 
+def _y_minimo(f: FFTClases) -> float:
+    """Abajo del piso de ruido, que es más bajo con la señal completa."""
+    return 3e-5 if f.modo == "senal" else 1e-4
+
+
 def _dibujar_fft(ax, f: FFTClases, c: str, color: str, escala: str, fmax: float, lw: float = 0.8, alpha: float = 0.2,
-                 piso_grafico: float = 1e-4, fmin: float = 0.0) -> None:
+                 fmin: float = 0.0) -> None:
     b = (f.freqs > fmin) & (f.freqs <= fmax)
     x, m, s = f.freqs[b], f.media[c][b], f.desvio[c][b]
-    abajo = np.maximum(m - s, piso_grafico) if escala == "log" else np.maximum(m - s, 0.0)
+    abajo = np.maximum(m - s, _y_minimo(f)) if escala == "log" else np.maximum(m - s, 0.0)
     ax.fill_between(x, abajo, m + s, color=color, alpha=alpha, lw=0, zorder=1)
     ax.plot(x, m, color=color, lw=lw, zorder=2)
 
@@ -310,7 +323,7 @@ def plot_fft_clases(f: FFTClases, escala: str = "log", fmax: float = 3000.0, nco
             ax.plot(f.freqs[b], f.media[PISO_ETIQUETA][b], color=APAGADO, lw=0.5, zorder=0)
         _dibujar_fft(ax, f, c, COLOR_CLASE.get(c, "#2a78d6"), escala, fmax, alpha=0.2 if log else 0.3)
         if log:
-            ax.set_yscale("log"); ax.set_ylim(1e-4, 30)
+            ax.set_yscale("log"); ax.set_ylim(_y_minimo(f), 30)
         else:
             ax.set_ylim(bottom=0)
         ax.set_xlim(0, fmax); ax.grid(axis="y"); ax.set_xticks(np.arange(0, fmax + 1, 500 if fmax > 1000 else 100))
@@ -345,7 +358,7 @@ def plot_fft_superpuestas(f: FFTClases, escala: str = "log", paso: float | None 
             _dibujar_fft(ax, f, c, COLOR_CLASE.get(c, "#2a78d6"), escala, fin, lw=0.9, alpha=alpha, fmin=ini)
         tope = max((f.media[c] + f.desvio[c])[b].max() for c in clases)
         if log:
-            ax.set_yscale("log"); ax.set_ylim(1e-4, tope * 1.5)
+            ax.set_yscale("log"); ax.set_ylim(_y_minimo(f), tope * 1.5)
         else:
             ax.set_ylim(0, tope * 1.05)
         ax.set_xlim(ini, fin); ax.grid(axis="y")
@@ -365,3 +378,135 @@ def plot_fft_superpuestas(f: FFTClases, escala: str = "log", paso: float | None 
     fig.legend(handles=h, loc="upper left", bbox_to_anchor=(0.005, 1 - 0.3 / alto_total), ncols=len(h))
     fig.tight_layout(rect=(0, 0, 1, 1 - 0.65 / alto_total))
     return fig
+
+
+# ---------------------------------------------- combinada real, individuales y sintética --
+
+COLOR_SINTETICA = "#6250d6"
+GRUPO_DE_COLOR = {"calefon": "resistiva", "horno": "resistiva", "pava": "resistiva", "plancha": "resistiva", "airecalor": "aire"}
+
+
+@dataclass
+class ComparacionCombinada:
+    """Espectros de una captura combinada real, de cada carga medida sola y de su mezcla sintética."""
+    etiqueta: str
+    lugar: str
+    freqs: np.ndarray
+    senales: list           # [{"rol", "archivo", "rms_A", "mag", "color"}]; real, individuales, sintética
+
+
+def _nombre_archivo(r) -> str:
+    return r.ruta.split("/")[-1][:15]
+
+
+def _combinadas_disponibles(ds: Dataset) -> dict:
+    """{(clases, lugar): capturas} de combinadas que tienen todas sus cargas medidas solas en ese lugar."""
+    solas = {(r.clases[0], r.lugar) for r in ds.registros if r.tipo == TIPO_INDIVIDUAL}
+    out = {}
+    for r in ds.registros:
+        if r.tipo == TIPO_COMBINADA and all((c, r.lugar) in solas for c in r.clases):
+            out.setdefault((r.clases, r.lugar), []).append(r)
+    return out
+
+
+def comparar_combinada(ds: Dataset, combinacion: str, lugar: str | None = None, seed: int = 0, cfg: Config | None = None,
+                       alinear_f0: bool = True) -> ComparacionCombinada:
+    """Toma la captura real de RMS mediano de esa combinación. Para cada carga elige la captura individual
+    más cercana en el tiempo y en el mismo lugar, y las mezcla con la misma función y los mismos parámetros
+    que el entrenamiento. `ds` tiene que tener las clases originales: "calefon", no "resistiva"."""
+    cfg = cfg or Config()
+    clases = tuple(sorted(c.strip() for c in combinacion.replace("+", ",").split(",")))
+    disponibles = _combinadas_disponibles(ds)
+    grupos = {k: v for k, v in disponibles.items() if k[0] == clases and (lugar is None or k[1] == lugar)}
+    if not grupos:
+        opciones = sorted({"+".join(k[0]) + f" ({k[1]})" for k in disponibles})
+        raise ValueError(f"no hay '{combinacion}' con sus cargas medidas solas. Disponibles: {opciones}")
+    (_, lugar), capturas = max(grupos.items(), key=lambda kv: len(kv[1]))
+    capturas = sorted(capturas, key=lambda r: float(np.std(r.datos)))
+    real = capturas[len(capturas) // 2]
+    t_real = _timestamp(real.ruta)
+    individuales = []
+    for c in clases:
+        solas = [r for r in ds.registros if r.tipo == TIPO_INDIVIDUAL and r.clases == (c,) and r.lugar == lugar]
+        individuales.append(min(solas, key=lambda r: abs((_timestamp(r.ruta) - t_real).total_seconds())))
+    fs = ds.fs()
+    sintetica = combinar([r.datos for r in individuales], np.random.default_rng(seed), cfg.mix_escala, fs, cfg.f_red, cfg.mix_fase,
+                         cfg.mix_jitter_fase, alinear_f0=cfg.mix_alinear_f0, armonicas_azar=cfg.mix_armonicas_azar)
+    n_fft = max(len(x) for x in [real.datos, sintetica] + [r.datos for r in individuales])
+    espectro_de = lambda x: _fft_senal(x, n_fft, fs, cfg.f_red, alinear_f0)
+    senales = [{"rol": "Combinada real", "archivo": _nombre_archivo(real), "rms_A": float(np.std(real.datos)), "mag": espectro_de(real.datos)[0][0], "color": TINTA}]
+    for c, r in zip(clases, individuales):
+        senales.append({"rol": f"Individual: {c}", "archivo": _nombre_archivo(r), "rms_A": float(np.std(r.datos)), "mag": espectro_de(r.datos)[0][0],
+                        "color": COLOR_CLASE.get(GRUPO_DE_COLOR.get(c, c), "#2a78d6")})
+    senales.append({"rol": "Sintética", "archivo": "suma de las individuales", "rms_A": float(np.std(sintetica)), "mag": espectro_de(sintetica)[0][0], "color": COLOR_SINTETICA})
+    return ComparacionCombinada("+".join(clases), lugar, espectro_de(real.datos)[1].astype(np.float64), senales)
+
+
+def _picos_armonicos(C: ComparacionCombinada, mag: np.ndarray, armonicas_k) -> np.ndarray:
+    return np.array([mag[np.abs(C.freqs - k * 50.0) <= 8.0].max() for k in armonicas_k])
+
+
+def tabla_combinada(C: ComparacionCombinada, armonicas_k=(1, 2, 3, 4, 5, 7, 9, 11, 13)) -> pd.DataFrame:
+    """Amplitud de cada armónica en cada señal [mA], y cuánto se aparta la sintética de la real [dB]."""
+    tabla = {s["rol"]: _picos_armonicos(C, s["mag"], armonicas_k) * 1e3 for s in C.senales}
+    k = np.rint(C.freqs / 50.0)
+    fuera = (np.abs(C.freqs - k * 50.0) >= 15.0) & (C.freqs >= 1000.0) & (C.freqs <= 3000.0)
+    for s in C.senales:
+        tabla[s["rol"]] = np.append(tabla[s["rol"]], 1e3 * float(np.median(s["mag"][fuera])))
+    t = pd.DataFrame(tabla, index=[f"H{k}" for k in armonicas_k] + ["piso de 1 a 3 kHz"]).round(2)
+    t["sintética − real [dB]"] = (20 * np.log10(tabla["Sintética"] / tabla["Combinada real"])).round(1)
+    return t
+
+
+def resumen_combinaciones(ds: Dataset, seed: int = 0) -> pd.DataFrame:
+    """Para elegir qué mirar: qué tan parecida es la sintética a la real en cada combinación.
+    dif_H2_H40: mediana de |sintética − real| en dB, en las armónicas que superan 1 mA en alguna de las dos."""
+    filas = []
+    for (clases, lugar), capturas in sorted(_combinadas_disponibles(ds).items(), key=lambda kv: -len(kv[1])):
+        C = comparar_combinada(ds, "+".join(clases), lugar, seed)
+        real, sint = C.senales[0], C.senales[-1]
+        k = np.arange(2, 41)
+        a, b = _picos_armonicos(C, real["mag"], k), _picos_armonicos(C, sint["mag"], k)
+        m = (a > 1e-3) | (b > 1e-3)
+        filas.append({"combinacion": C.etiqueta, "lugar": lugar, "capturas": len(capturas), "rms_real_A": real["rms_A"], "rms_sintetica_A": sint["rms_A"],
+                      "dif_H1_dB": 20 * np.log10(_picos_armonicos(C, sint["mag"], [1])[0] / _picos_armonicos(C, real["mag"], [1])[0]),
+                      "dif_H3_dB": 20 * np.log10(_picos_armonicos(C, sint["mag"], [3])[0] / _picos_armonicos(C, real["mag"], [3])[0]),
+                      "dif_H2_H40_dB": float(np.median(np.abs(20 * np.log10(b[m] / a[m]))))})
+    return pd.DataFrame(filas).round(2).set_index("combinacion")
+
+
+def plot_combinada(C: ComparacionCombinada, escala: str = "log", paso: float | None = None, fmax: float = 3000.0, columnas: int = 3) -> list:
+    """Una fila por señal: real, individuales y sintética. Sin `paso`, de 0 a fmax. Con `paso`, una columna por rango;
+    dentro de cada rango todas las señales comparten la escala vertical, para poder compararlas.
+    Devuelve una lista de figuras, porque los rangos de a 500 Hz no entran en una sola."""
+    log = escala == "log"
+    bordes = np.arange(0.0, fmax + 1, paso) if paso else np.array([0.0, fmax])
+    rangos = list(zip(bordes[:-1], bordes[1:]))
+    tandas = [rangos[i:i + columnas] for i in range(0, len(rangos), columnas)] if paso else [rangos]
+    figuras = []
+    for parte, tanda in enumerate(tandas):
+        fig, axs = plt.subplots(len(C.senales), len(tanda), figsize=(13.5, 1.9 * len(C.senales) + 0.9), squeeze=False)
+        for j, (ini, fin) in enumerate(tanda):
+            b = (C.freqs > ini) & (C.freqs <= fin)
+            tope = max(s["mag"][b].max() for s in C.senales)
+            ancho = fin - ini
+            for i, s in enumerate(C.senales):
+                ax = axs[i, j]
+                ax.plot(C.freqs[b], s["mag"][b], color=s["color"], lw=0.8)
+                if log:
+                    ax.set_yscale("log"); ax.set_ylim(3e-5, tope * 1.5)
+                else:
+                    ax.set_ylim(0, tope * 1.05)
+                ax.set_xlim(ini, fin); ax.grid(axis="y")
+                ax.set_xticks(np.arange(ini, fin + 1, 500.0 if ancho > 1000 else (200.0 if ancho > 500 else 100.0)))
+                ax.set_title(f"{s['rol']}" + (f", {ini:.0f} a {fin:.0f} Hz" if paso else f" ({s['archivo']}, {s['rms_A']:.2f} A RMS)"), loc="left", fontsize=9)
+                if i < len(C.senales) - 1:
+                    ax.tick_params(labelbottom=False)
+                if j == 0:
+                    ax.set_ylabel("|I| [A]")
+            axs[-1, j].set_xlabel("f [Hz]")
+        rango = f"rangos de {paso:.0f} Hz" + (f" ({parte + 1} de {len(tandas)})" if len(tandas) > 1 else "") if paso else f"0 a {fmax:.0f} Hz"
+        fig.suptitle(f"{C.etiqueta} en {C.lugar}, escala {'logarítmica' if log else 'lineal'}, {rango}", x=0.01, ha="left", fontsize=10)
+        fig.tight_layout()
+        figuras.append(fig)
+    return figuras

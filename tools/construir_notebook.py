@@ -160,7 +160,7 @@ md("""
 - **Sin corregir f0, la señal completa promedia peor**: el pico de H20 baja 2.8 dB, porque los picos son tan finos que un corrimiento chico los separa. Con la corrección baja 0.9 dB.
 - **Ventanas + f0 es la que mejor conserva las armónicas altas** (H40: -1.4 dB, contra -2.1 dB de la señal completa + f0), y es exactamente lo que ve el modelo.
 
-**Decisión**: los gráficos siguientes usan **ventanas + f0**, para que muestren lo mismo que recibe el modelo. Para ver más detalle, cambiá `F` por `FFTS["señal completa + f0"]`.
+**Decisión**: los gráficos siguientes usan **señal completa + f0**, por su resolución y su piso más bajo. Ojo: el modelo no ve esto, sino ventanas de 2048. Para ver lo mismo que el modelo, cambiá `F` por `FFTS["ventanas + f0"]`.
 """)
 
 md("""
@@ -170,7 +170,7 @@ Línea: media de todas las muestras de la clase. Banda: ±1 desvío estándar. T
 En escala logarítmica, la banda llega abajo de todo donde el desvío es mayor o igual que la media, porque media − desvío no se puede dibujar.
 """)
 code("""
-F = FFTS["ventanas + f0"]
+F = FFTS["señal completa + f0"]
 eda.plot_fft_clases(F, escala="log")
 plt.show()
 """)
@@ -184,17 +184,17 @@ md("""
 
 | Clase | H1 (A pico) | H3 (mA) | Qué la caracteriza |
 |---|---|---|---|
-| `resistiva` | 10.4 ± 1.7 | 111 ± 51 | casi todo en H1; lo demás es la distorsión de la red |
-| `aire` | 6.0 ± 2.5 | 640 ± 408 | armónicas pares bajas, H2 de ~0.85 A |
-| `lavarropa` | 2.3 ± 1.3 | 893 ± 539 | H3 fuerte y mucha variación entre etapas |
-| `aireinverter` | 2.2 ± 0.4 | 981 ± 618 | contenido también entre armónicas, y aún visible a 3 kHz |
-| `heladera` | 0.77 ± 0.15 | 88 ± 26 | parecida a una resistiva chica, con H3 de ~11 % |
-| `luces` | 0.24 ± 0.17 | 173 ± 120 | H3 de ~70 % de H1: impares muy fuertes |
+| `resistiva` | 10.8 ± 1.9 | 125 ± 55 | casi todo en H1; lo demás es la distorsión de la red |
+| `aire` | 6.3 ± 2.7 | 706 ± 448 | armónicas pares bajas, H2 de ~0.8 A |
+| `lavarropa` | 2.2 ± 1.2 | 903 ± 535 | H3 fuerte y mucha variación entre etapas |
+| `aireinverter` | 2.2 ± 0.5 | 1056 ± 644 | contenido también entre armónicas, y aún visible a 3 kHz |
+| `heladera` | 0.78 ± 0.16 | 90 ± 28 | parecida a una resistiva chica, con H3 de ~12 % |
+| `luces` | 0.25 ± 0.18 | 185 ± 129 | H3 de ~75 % de H1: impares muy fuertes |
 
 - **La escala logarítmica es la que deja comparar**: las armónicas son hasta 1000 veces menores que H1. La lineal sirve para ver cómo se reparte la corriente en las primeras armónicas.
-- **El desvío es grande en todas las clases**: en los picos de las armónicas impares va del 46 % de la media en `resistiva` al 96 % en `aire`. La media resume equipos y estados distintos, no un aparato típico.
-- **Entre armónicas**: `aireinverter` (19 mA) y `lavarropa` (5 mA) tienen mucho más contenido que el resto (0.3 a 0.9 mA, cerca del piso), hasta 1 kHz.
-- **El piso es de ~0.22 mA**: las armónicas de casi todas las clases se pierden en él cerca de 2-3 kHz, salvo en `aireinverter`.
+- **El desvío es grande en todas las clases**: en los picos de las armónicas impares va del 45 % de la media en `resistiva` al 95 % en `aire`. La media resume equipos y estados distintos, no un aparato típico.
+- **Entre armónicas**: `aireinverter` (3.0 mA) y `lavarropa` (2.4 mA) tienen mucho más contenido que el resto (0.1 a 0.35 mA), hasta 1 kHz.
+- **El piso es de ~0.09 mA**, por debajo de casi todas las armónicas hasta 3 kHz.
 """)
 
 md("""
@@ -224,21 +224,73 @@ plt.show()
 code("""
 eda.plot_fft_superpuestas(F, escala="lin", paso=500.0)
 plt.show()
-plt.rcdefaults()     # la Parte B usa el estilo por defecto de matplotlib
 """)
 md("""
 **Lectura.** Qué se separa en cada rango:
 
 | Rango | Qué se ve |
 |---|---|
-| 0 a 500 Hz | H1 ordena por corriente, pero los equipos de cada clase se solapan. En las pares bajas se abren las familias: a 100 Hz, `aire` 851, `aireinverter` 217, `lavarropa` 121, `heladera` 25, `resistiva` 7 y `luces` 4 mA |
-| 500 a 1000 Hz | En las impares casi todas se tocan. En las pares siguen arriba `aire`, `aireinverter` y `lavarropa` (a 700 Hz: 8, 17 y 15 mA, contra menos de 1 mA del resto) |
-| 1000 a 2000 Hz | `aire` se apaga. Quedan `lavarropa` en las pares (a 1500 Hz: 4 mA contra 0.3 a 1 mA) y `aireinverter` (13 a 17 mA, casi plano) |
-| 2000 a 3000 Hz | Solo se separan claramente `aireinverter` (12 mA a 2500 Hz) y, algo menos, `lavarropa` (1.3 mA). El resto queda en el piso de ~0.3 mA, salvo los picos impares |
+| 0 a 500 Hz | H1 ordena por corriente, pero los equipos de cada clase se solapan. En las pares bajas se abren las familias: a 100 Hz, `aire` 799, `lavarropa` 136, `aireinverter` 30, `heladera` 24, `resistiva` 7 y `luces` 4 mA |
+| 500 a 1000 Hz | En las impares casi todas se tocan. En las pares siguen arriba `lavarropa`, `aire` y `aireinverter` (a 700 Hz: 12, 7 y 5 mA, contra menos de 1 mA del resto) |
+| 1000 a 2000 Hz | `aire` se apaga. Quedan `aireinverter` (a 1500 Hz, 6 mA) y `lavarropa` en las pares (4 mA), contra 0.2 a 0.7 mA del resto |
+| 2000 a 3000 Hz | Solo se separan claramente `aireinverter` (a 2500 Hz, 5.6 mA) y, algo menos, `lavarropa` (1 mA). El resto queda cerca del piso, salvo los picos impares |
 
 - **Las pares separan familias en casi todo el rango**, y las impares casi no: ahí se pisan `luces`, `resistiva` y `heladera`, coherente con que `heladera` y `luces` sean las clases más difíciles.
 - **`aireinverter` tiene contenido en todas las frecuencias**, también entre armónicas. Con solo dos equipos, y muy distintos entre sí, puede ser propio de ellos y no de la clase.
+- **La resolución importa**: a 100 Hz, `aireinverter` da 30 mA con la señal completa y 217 mA con ventanas de 2048. Tiene bandas laterales al lado de la armónica, y la ventana las mezcla con ella.
 - **En lineal, los paneles que incluyen H1 quedan aplastados** por ella. Para ver lo demás sirven los otros rangos, o la escala logarítmica.
+""")
+
+md("""
+## A6. Combinada real, sus individuales y la sintética
+Compara la FFT de una captura combinada real con la de cada carga medida sola y con su mezcla sintética, armada con la misma función y los mismos parámetros que el entrenamiento.
+
+- **Real**: la captura de RMS mediano de esa combinación.
+- **Individuales**: para cada carga, la captura más cercana en el tiempo y en el mismo lugar. Usa las clases originales (`calefon`, no `resistiva`), para no mezclarla con otro aparato.
+- **Sintética**: la suma de esas individuales, alineadas por su fundamental y con ±5 % de amplitud.
+
+Dentro de cada rango de frecuencia, todas las señales comparten la escala vertical. Para ver otra combinación, cambiá `COMBINACION`; la primera tabla lista las disponibles (`dif`: sintética − real en dB, y `dif_H2_H40`: mediana del error absoluto).
+""")
+code("""
+display(eda.resumen_combinaciones(ds_eda))
+COMBINACION = "heladera+luces"
+C = eda.comparar_combinada(ds_eda, COMBINACION)
+display(eda.tabla_combinada(C))
+""")
+code("""
+eda.plot_combinada(C, escala="log")
+plt.show()
+""")
+code("""
+eda.plot_combinada(C, escala="log", paso=1000.0)
+plt.show()
+""")
+code("""
+eda.plot_combinada(C, escala="log", paso=500.0)
+plt.show()
+""")
+code("""
+eda.plot_combinada(C, escala="lin")
+plt.show()
+""")
+code("""
+eda.plot_combinada(C, escala="lin", paso=1000.0)
+plt.show()
+""")
+code("""
+eda.plot_combinada(C, escala="lin", paso=500.0)
+plt.show()
+plt.rcdefaults()     # la Parte B usa el estilo por defecto de matplotlib
+""")
+md("""
+**Lectura.** Mirando las 112 combinadas con su sintética:
+
+- **H1 coincide** cuando las cargas son estables: `heladera+luces`, `aire+calefon`, `aire+luces` y `calefon+luces` quedan a menos de 1 dB.
+- **La H3 sintética casi siempre es la suma directa de las individuales, y la real muchas veces no**: con `luces` hay cancelación. Medianas de H3 real contra sintética: `heladera+luces` 0.06 contra 0.20 A (+12 dB), `aire+luces` 0.27 contra 0.59 A (+7 dB), `calefon+luces` 0.12 contra 0.20 A (+4 dB). También pasa con `aireinverter+lavarropa` (+9 dB). En `aire+calefon`, donde una sola carga aporta casi toda la H3, coincide (0 dB).
+- **Hipótesis**: alinear por la fundamental de cada corriente ignora el ángulo de cada carga respecto de la tensión. Con las dos fundamentales forzadas en fase, las H3 de un motor y de una fuente conmutada quedan en fase, cuando en la realidad se restan en parte. Las capturas con tensión permiten comprobarlo: alcanza con alinear las mezclas por la fase de la tensión.
+- **Es una limitación actual para `luces` en mezclas**: el modelo entrena con mucha más H3 que la que ve en una combinada real.
+- **El piso de la sintética queda ~2.5 dB más alto** con dos cargas, porque suma el ruido de cada captura, y una captura real tiene el ruido de una sola medición. Es un efecto chico: unas décimas de mA.
+- **`lavarropa` queda lejos por otro motivo**: la captura sola más cercana puede estar en otra etapa del ciclo que la combinada. En `lavarropa+luces`, H1 da 0.85 contra 1.83 A.
 """)
 
 md("""
