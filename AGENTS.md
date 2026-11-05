@@ -53,8 +53,8 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
     (0/1) en vez de promediar fracciones de hoja → probabilidades distintas
     a sklearn; `loadable` cuantiza a int16. Umbrales de nodo redondeados hacia
     abajo a float32 para preservar `f32 <= thr64`.
-  - `eda.py` — Parte A del notebook (EDA, no entrena). `calcular_espectros(ds)`
-    + funciones `plot_*` y tablas. Cada ráfaga pesa igual dentro de su clase.
+  - `eda.py` — Parte A del notebook (EDA, no entrena): inventario, forma de onda, `fft_por_clase`
+    (media y desvío, por ventanas o señal completa), firmas acumuladas y distribución/outliers.
 
 ## Flujo por fold (para train.py)
 ```
@@ -375,6 +375,16 @@ Base LOLO (10 semillas): todas_s 0.708, ind 0.743, comb 0.683, comb exact 0.277,
 - No funcionaron: franjas angostas por clase (exact -0.14), solo impares, forma+H1, escala amplia en mezclas, filtro por corriente.
 - tele+luces en clases proyectadas: +0.022 (no +0.044). La mezcla alineada ya reproduce la suma real de armónicas.
 - ~50 variantes sobre los mismos 4 lugares: hay riesgo de selección; hace falta una casa nueva congelada para confirmar.
+
+## Hallazgos del EDA que ya no están en el notebook (limpieza 2026-11-05; código en el commit 7916c79)
+- THD: resistivas 0.02, heladera 0.17, aire 0.22, lavarropa 0.49, aireinverter 0.79, tele/luces ~1.2.
+- Fuera de la fundamental, el 99 % de la potencia termina antes de ~1.15 kHz salvo aireinverter (1.97 kHz); arriba de 3 kHz solo
+  queda piso salvo aireinverter; menos de 1 % de la potencia cae entre armónicas salvo aireinverter (17 %).
+- AUC por armónica con ráfagas y permutación: aire = H2, H4, H6, H8; lavarropa = pares desde H8 y H3; luces = impares;
+  en combinadas reales solo aireinverter y resistiva (H1) superan el azar.
+- Forma: tres familias (resistivas 2-4 dB, motores 7-10 dB, electrónica 5-9 dB). aireinverter, luces y heladera cambian más entre
+  lugares que lo que las separa de la clase más parecida. Misma pava en dos casas: 4.2 dB de forma y 0.1 % de corriente.
+- PCA sobre 614 bins: 5 componentes = 90 %, 10 = 95 %. H1 de combinadas suma lineal (1.02); armónicas casi en cuadratura (0.97).
 
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:

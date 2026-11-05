@@ -30,7 +30,7 @@ AGRUPAR = {"calefon": "resistiva", "horno": "resistiva", "pava": "resistiva", "p
 BASE = Config(agrupar=AGRUPAR, excluir_clases=("parasito",), mix_sesgo_grande_chica=0.5, mix_total=100, rawfft_f0=False,
               min_rafagas=1)
 
-# Tabla de franjas de la síntesis del EDA (A14). Se dedujo mirando TODO el dataset, incluido el
+# Tabla de franjas que salió del EDA. Se dedujo mirando TODO el dataset, incluido el
 # lugar de test de cada fold, así que su resultado es algo optimista.
 FRANJAS_EDA = {"resistiva": (0.0, 100.0, "todo"), "aire": (0.0, 400.0, "armonicas"),
                "lavarropa": (0.0, 3000.0, "pares"), "heladera": (0.0, 750.0, "armonicas"),

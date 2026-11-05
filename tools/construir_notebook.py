@@ -86,72 +86,45 @@ print(f"nilm_pipeline {nilm_pipeline.__version__} | colab={EN_COLAB}\\ndatos:   
 md("""
 # Parte A: Análisis Exploratorio de Datos
 
-**Qué queremos saber.** Antes de elegir modelo: qué hay en estas señales, si los datos son confiables y, sobre todo, **en qué frecuencias se destaca cada clase**, para trabajar solo sobre las franjas que aportan y descartar las que son ruido.
+Usa las mismas clases que el modelo: resistivas y `airecalor` agrupadas, y sin las clases con pocas muestras.
 
-**Unidad de análisis.** Las capturas de una misma ráfaga están separadas por segundos y son casi duplicados. Por eso las estadísticas por clase pesan igual a cada ráfaga, y los tests de separabilidad usan la ráfaga como unidad. En `luces` cada ráfaga es otra cantidad de lámparas encendidas, y el cambio puede tardar menos que la pausa que separa ráfagas, así que ahí también se corta cuando el nivel salta más de 1.5 dB entre capturas.
+**Unidad de análisis.** Las capturas tomadas seguidas, de una misma carga, son casi duplicados. En `luces` cada ráfaga es otra cantidad de lámparas encendidas, y el cambio puede tardar menos que la pausa que separa ráfagas, así que ahí también se corta cuando el nivel salta más de 1.5 dB entre capturas.
 
 **Una clase reúne equipos de distinta potencia.** Cada equipo consume lo suyo, así que una diferencia de corriente dentro de una clase es esperable y no es, por sí sola, una anomalía.
 
-**Espectro.** Se calcula con las mismas funciones que el borde: ventana Hann de 2048 muestras (0.2 s), bins de 4.88 Hz, amplitud en A.
-
-**Cómo leer esta parte.** Los textos "Lectura" comentan el dataset `dfe60d02ca` (297 capturas, 2026-11-04). Si el hash que imprime la celda siguiente es otro, los gráficos se actualizan solos pero esos textos hay que releerlos.
+**Cómo leer esta parte.** Los textos "Lectura" comentan el dataset `dfe60d02ca` (297 capturas, 2026-11-05). Si el hash que imprime la celda siguiente es otro, los gráficos se actualizan solos pero esos textos hay que releerlos.
 """)
 code("""
 from nilm_pipeline import eda
 eda.estilo()
+GRUPOS = {"calefon": "resistiva", "horno": "resistiva", "pava": "resistiva", "plancha": "resistiva", "airecalor": "aire"}
 ds_eda = cargar_dataset(RUTA_DATOS)
-E = eda.calcular_espectros(ds_eda)
 print(ds_eda.resumen())
-print(f"\\n{E.mag.shape[0]} ventanas x {E.mag.shape[1]} bins de {E.fs / E.W:.2f} Hz")
-
-# Clases físicamente equivalentes, para los análisis que comparan una clase contra el resto
-GRUPOS = {"calefon": "resistiva", "horno": "resistiva", "pava": "resistiva", "plancha": "resistiva",
-          "secadorpelo": "resistiva", "airecalor": "aire"}
+ds_clases = preparar_dataset(ds_eda, Config(agrupar=GRUPOS, excluir_clases=("parasito",)))
+E = eda.calcular_espectros(ds_clases)
 """)
 
 md("""
-## A1. Inventario: cuántos datos hay realmente
+## A1. Inventario y control de las capturas
 """)
 code("""
 display(eda.inventario(E))
-eda.plot_inventario(E)
-plt.show()
 display(eda.combinadas_por_lugar(E))
-""")
-md("""
-**Lectura.**
-- Las 169 capturas individuales son **51 ráfagas**: ese es el tamaño efectivo. `parasito`, `tele`, `airecalor`, `hidro` y `secadorpelo` tienen una sola.
-- **Ráfagas no es lo mismo que equipos**: `pava` tiene 2 ráfagas en 2 lugares, pero es la misma pava. Las 17 de `luces` son configuraciones, varias de las mismas lámparas. En cambio, las 5 de `aire` son 5 equipos distintos.
-- Ninguna clase está en los 4 lugares. `lavarropa`, por ejemplo, solo se midió en dos.
-- Las 112 combinadas vienen de solo dos lugares y casi todas las combinaciones tienen una única ráfaga. Toda conclusión sobre combinadas se apoya en muy pocas ocasiones independientes.
-""")
-
-md("""
-## A2. Calidad de los datos
-Faltantes y saturación, offset de continua, frecuencia de red real y capturas que se apartan de su propia ráfaga.
-""")
-code("""
 q = eda.calidad(E)
 print(f"Capturas por duración [s]: {q['duracion_s']}")
 print(f"Corriente máxima: {q['max_abs_A']:.1f} A (riel ±{q['riel_A']:.2f} A); capturas con muestras en el riel: {q['con_muestras_en_riel']}")
-print(f"f0 mediana por captura: {q['f0_captura_min_max'][0]:.2f} a {q['f0_captura_min_max'][1]:.2f} Hz")
-print(f"Con ese desvío, la armónica {q['armonica_que_se_corre_un_bin']:.0f} ya se corre un bin entero ({q['ancho_bin_hz']:.2f} Hz)")
-display(q["dc_mA_por_lugar"])
-eda.plot_calidad(E)
-plt.show()
-print("Capturas que se apartan de su ráfaga:")
-display(eda.atipicas(E))
+print(f"f0 por captura: {q['f0_captura_min_max'][0]:.2f} a {q['f0_captura_min_max'][1]:.2f} Hz")
 """)
 md("""
 **Lectura.**
-- **Sin saturación ni capturas dañadas**: máximo 22.3 A contra un riel de ±24.75 A. El loader tampoco reporta archivos inválidos ni faltantes.
-- **El offset es una marca del lugar**: unos -25 mA en `casa`, +118 en `depaleo`, +105 en `depamica`. Si llegara al modelo, aprendería a reconocer la casa. El pipeline lo quita por ventana, y esto confirma que hay que seguir haciéndolo. En `local` además varió dentro de la sesión: unos -200 mA en los dos aires (18:25 a 18:30), +27 mA a las 18:37 y ~+85 mA desde las 18:44. No depende del equipo, porque los dos aires dan lo mismo, y la causa no se conoce.
-- **La red se mueve**: 49.91 a 50.11 Hz entre capturas, ya descontado un sesgo del estimador de f0, que con esta ventana lee +0.074 Hz. A partir de la armónica ~43 (2.1 kHz) eso corre la línea un bin completo. En otra red o en otro momento puede moverse más: la Parte B mide lo que eso le hace al modelo.
-- **Atípicas**: se eliminó del dataset `lavarropa/20260922_180045`, que medía 81 mA contra ~1.35 A de mediana y parecía la máquina en pausa. Las `lavarropa` que quedan en la tabla, y un `aireinverter` de `casa` (0.77 A contra ~1.8 A), parecen cambios de estado reales. La A12 lo analiza con la firma completa.
+- **Ráfagas no es lo mismo que equipos.** Las 5 ráfagas de `aire` son 5 equipos, más los modos de `airecalor`. En `resistiva`, las de `pava` son la misma unidad en dos lugares. Las 17 de `luces` son configuraciones, varias de las mismas lámparas.
+- **Sin saturación**: máximo 22.3 A contra un riel de ±24.75 A. Conviene volver a mirar esta línea al sumar capturas nuevas.
+- **Red**: 49.91 a 50.11 Hz, ya descontado un sesgo del estimador de f0, que con esta ventana lee +0.074 Hz.
+- **Las combinadas salen de solo dos lugares.**
 """)
 
 md("""
-## A3. Forma de onda
+## A2. Forma de onda
 Un ciclo promedio por captura, alineado a la fundamental de la propia corriente. Cada escala vertical es distinta: acá importa la forma.
 """)
 code("""
@@ -159,171 +132,107 @@ eda.plot_ciclos(E)
 plt.show()
 """)
 md("""
-**Lectura.** Se distinguen tres comportamientos físicos:
-- **Resistivas** (`pava`, `plancha`, `horno`, `calefon`): senoidales puras. Solo cambia la amplitud, porque cada equipo tiene su potencia: `horno` tiene un equipo de ~5.5 A pico y otro de ~11 A.
-- **Motores** (`aire`, `airecalor`, `heladera`): senoide deformada y, en `aire`, algo asimétrica.
-- **Electrónica** (`tele`, `luces`, `aireinverter` de `depamica`): pulsos angostos, típicos de un rectificador con capacitor. `lavarropa` queda entre medio.
-
-Dos alertas para una casa nunca vista: los dos `aireinverter` son **ondas muy distintas** entre sí, y `lavarropa` va de ~1 A a 8 A pico según el momento del ciclo.
+**Lectura.**
+- **`resistiva`**: senoidales puras. Solo cambia la amplitud, porque cada equipo tiene su potencia (de ~5.5 a ~13 A pico).
+- **`aire` y `heladera`**: senoide deformada, y `aire` algo asimétrica. Los equipos de `aire` van de ~5 a ~12 A pico.
+- **`luces` y `aireinverter` de `depamica`**: pulsos angostos, típicos de un rectificador con capacitor.
+- **`lavarropa`** queda entre medio y va de ~1 a 8 A pico, según el momento del ciclo.
+- **Los dos `aireinverter` son ondas muy distintas entre sí**: es el caso más difícil para una casa nunca vista.
 """)
 
 md("""
-## A4. Descriptores simples
-Tres números por captura. Sirven de referencia: ¿qué se separa ya sin mirar el espectro?
+## A3. ¿FFT por ventanas de 2048 o de toda la señal?
+Hay dos formas de calcular la media y el desvío, y cada una se puede hacer con o sin corregir el eje con la f0:
+- **Ventanas**: un espectro por ventana de 2048 muestras (0.2 s), bins de 4.88 Hz. Es lo que recibe el modelo.
+- **Señal completa**: un espectro por captura. Las capturas de 1 s se completan con ceros hasta 2 s, para que todas compartan un eje de 0.5 Hz.
+
+`perdida_Hk` indica cuánto baja el pico de esa armónica al promediar, porque no cae exactamente en el mismo lugar en todos los espectros: cuanto más cerca de 0 dB, mejor.
 """)
 code("""
-eda.plot_descriptores(E)
+tabla_modos, FFTS = eda.comparar_modos_fft(ds_clases)
+display(tabla_modos)
+eda.plot_comparar_modos_fft(FFTS, clase="aire", fmin=900.0, fmax=1100.0)
 plt.show()
 """)
 md("""
 **Lectura.**
-- **El THD ordena por familia**: resistivas 0.02, `heladera` 0.17, `aire` 0.22, `lavarropa` 0.49, `aireinverter` 0.79, `tele` y `luces` ~1.2. En `nada` y `parasito` no significa lo mismo, porque la fundamental es casi tan chica como el ruido.
-- **Las cuatro resistivas se pisan** en los tres descriptores, y el RMS tampoco las separa: dos equipos de clases distintas consumen lo mismo.
-- **La corriente sola no alcanza**, porque las clases se solapan: `aire` y `calefon`, o `tele` y `heladera`.
+- **La señal completa tiene 10 veces más resolución y menos de la mitad de piso de ruido** (0.09 contra 0.22 mA). Deja ver la estructura entre armónicas, que con 4.88 Hz queda borrosa.
+- **Sin corregir f0, la señal completa promedia peor**: el pico de H20 baja 2.8 dB, porque los picos son tan finos que un corrimiento chico los separa. Con la corrección baja 0.9 dB.
+- **Ventanas + f0 es la que mejor conserva las armónicas altas** (H40: -1.4 dB, contra -2.1 dB de la señal completa + f0), y es exactamente lo que ve el modelo.
+
+**Decisión**: los gráficos siguientes usan **ventanas + f0**, para que muestren lo mismo que recibe el modelo. Para ver más detalle, cambiá `F` por `FFTS["señal completa + f0"]`.
 """)
 
 md("""
-## A5. Firmas acumuladas por clase
+## A4. Media y desvío de la FFT por clase
+Línea: media de todas las muestras de la clase. Banda: ±1 desvío estándar. Todas las muestras pesan igual, así que una ocasión con muchas capturas pesa más.
+
+En escala logarítmica, la banda llega abajo de todo donde el desvío es mayor o igual que la media, porque media − desvío no se puede dibujar.
+""")
+code("""
+F = FFTS["ventanas + f0"]
+eda.plot_fft_clases(F, escala="log")
+plt.show()
+""")
+code("""
+# En lineal, arriba de 1 kHz casi todo se ve como cero: cambiá fmax para ver otro rango
+eda.plot_fft_clases(F, escala="lin", fmax=1000.0)
+plt.show()
+""")
+md("""
+**Lectura.**
+
+| Clase | H1 (A pico) | H3 (mA) | Qué la caracteriza |
+|---|---|---|---|
+| `resistiva` | 10.4 ± 1.7 | 111 ± 51 | casi todo en H1; lo demás es la distorsión de la red |
+| `aire` | 6.0 ± 2.5 | 640 ± 408 | armónicas pares bajas, H2 de ~0.85 A |
+| `lavarropa` | 2.3 ± 1.3 | 893 ± 539 | H3 fuerte y mucha variación entre etapas |
+| `aireinverter` | 2.2 ± 0.4 | 981 ± 618 | contenido también entre armónicas, y aún visible a 3 kHz |
+| `heladera` | 0.77 ± 0.15 | 88 ± 26 | parecida a una resistiva chica, con H3 de ~11 % |
+| `luces` | 0.24 ± 0.17 | 173 ± 120 | H3 de ~70 % de H1: impares muy fuertes |
+
+- **La escala logarítmica es la que deja comparar**: las armónicas son hasta 1000 veces menores que H1. La lineal sirve para ver cómo se reparte la corriente en las primeras armónicas.
+- **El desvío es grande en todas las clases**: en los picos de las armónicas impares va del 46 % de la media en `resistiva` al 96 % en `aire`. La media resume equipos y estados distintos, no un aparato típico.
+- **Entre armónicas**: `aireinverter` (19 mA) y `lavarropa` (5 mA) tienen mucho más contenido que el resto (0.3 a 0.9 mA, cerca del piso), hasta 1 kHz.
+- **El piso es de ~0.22 mA**: las armónicas de casi todas las clases se pierden en él cerca de 2-3 kHz, salvo en `aireinverter`.
+""")
+
+md("""
+## A5. Todas las clases superpuestas
+Arriba, el rango completo. Abajo, el detalle hasta 500 Hz, donde está la mayor parte de la diferencia. Cada clase tiene siempre el mismo color.
+""")
+code("""
+eda.plot_fft_superpuestas(F, escala="log")
+plt.show()
+""")
+code("""
+eda.plot_fft_superpuestas(F, escala="lin")
+plt.show()
+""")
+md("""
+**Lectura.**
+- **En lineal casi todo lo separa H1**: la corriente ordena las clases, pero los equipos de cada una se solapan, y nada garantiza ese orden en otra casa.
+- **En log, las armónicas pares y los bins entre armónicas separan familias**. En 100 Hz, `aire` está unas 100 veces por encima de `resistiva` (850 contra 7 mA). Entre armónicas, `aireinverter` y `lavarropa` quedan muy por encima de las demás.
+- **En impares altas casi todas se tocan**: ahí se pisan `luces`, `resistiva` y `heladera`, y las bandas se solapan. Es coherente con que `heladera` y `luces` sean las clases más difíciles.
+""")
+
+md("""
+## A6. Firmas acumuladas por clase
 Se superponen los espectros de **todas las ventanas de cada clase**. El color indica qué fracción de las ventanas tiene esa amplitud en esa frecuencia, de modo que la "nube" muestra la firma estadística y no un único ejemplo. Línea oscura: mediana de la clase. Línea gris: piso de ruido (P99 de `nada`).
 """)
 code("""
 eda.plot_firmas_acumuladas(E, fmax=3000.0)
 plt.show()
 """)
-code("""
-# Detalle de la zona baja
-eda.plot_firmas_acumuladas(E, fmax=500.0, ncols=4)
-plt.show()
-""")
 md("""
 **Lectura.**
-- **Toda la información está en el peine de armónicas de 50 Hz.** Entre dientes la señal cae al piso, salvo en `aireinverter` y parte de `lavarropa`.
-- **El piso es muy bajo y plano**: unos 0.2 mA por bin (P99 ~0.5 mA) hasta 5 kHz. Más de 80 dB bajo una carga grande.
-- **Las resistivas no son "una línea sola"**: tienen H3 y H5 claras. Comparado con los pares I+V de calibración de octubre, la corriente sobre carga resistiva tiene H3/H5 = 1.41 % / 1.12 % y la tensión 1.55 % / 1.05 %: **esas armónicas son la distorsión de la tensión de red, no la firma de la carga**. Lo confirma un experimento natural: **la misma pava** da H1 = 12.24 y 12.23 A en `depaleo` y `depamica`, pero H3 = 0.11 y 0.19 A, y H5 = 0.17 y 0.09 A. Cambian con la casa, así que no conviene aprender de ellas.
-- **Armónicas pares**: en resistivas, `tele` y `luces` quedan muy por debajo de las impares; en `aire` y `lavarropa` son importantes. Esta es una franja útil de verdad (ver A9).
-- **`aireinverter` es otro mundo**: nube ancha y un lomo de 1.5 a 3.5 kHz, mucho más fuerte en el equipo de `casa`.
+- **Casi toda la información está en el peine de armónicas de 50 Hz.** Entre dientes la señal cae al piso, salvo en `aireinverter` y parte de `lavarropa`.
+- **Las armónicas de `resistiva` son la red, no la carga**: con la misma pava, en `depaleo` y `depamica`, H1 es igual (12.24 y 12.23 A), pero H3 da 0.11 y 0.19 A, y H5 0.17 y 0.09 A. Cambian con la casa, así que no conviene aprender de ellas.
+- **`aireinverter`**: nube ancha y un lomo de 1.5 a 3.5 kHz, mucho más fuerte en el equipo de `casa`.
 """)
 
 md("""
-## A6. Firma por armónica y por lugar
-La pregunta de una casa nunca vista: ¿la misma clase tiene la misma firma en otro lugar? Mediana por lugar y banda P10-P90. Primero en amperes y después relativa a la fundamental (forma).
-""")
-code("""
-eda.plot_firmas_armonicas(E)
-plt.show()
-""")
-code("""
-eda.plot_firmas_armonicas(E, relativo=True)
-plt.show()
-""")
-md("""
-**Lectura.**
-- **Una referencia útil**: la misma `pava` en dos casas difiere 4.2 dB en forma, y 0.1 % en corriente. Una diferencia de forma de ese orden en una carga con pocas armónicas propias puede ser solo la red.
-- **Transfieren bien entre lugares**: resistivas, `lavarropa` y, en buena medida, `heladera` y `aire`.
-- **No transfiere**: `aireinverter`. Entre sus dos unidades hay diferencias de un orden de magnitud por armónica.
-- **`lavarropa` generaliza muy bien**: son máquinas distintas y su forma difiere apenas 2.3 dB entre `depaleo` y `depamica`. Son solo dos unidades, así que falta confirmarlo con más.
-- **Un lugar no es un equipo**: en `local` se midieron dos aires, uno normal y un aire ventana, con H3 muy distinta (1.29 A y 0.51 A). En `casa` también hay dos, de 8.5 y ~3.5 A.
-- `luces` conserva el patrón impar, pero su amplitud cambia con la cantidad y el tipo de lámparas.
-""")
-
-md("""
-## A7. Energía acumulada: hasta dónde llega cada clase
-La otra lectura de "acumulada": cuánta potencia se juntó al llegar a cada frecuencia. Se resta el piso y se excluye la fundamental, porque si no todas las curvas llegan casi al 100 % en 50 Hz.
-""")
-code("""
-display(eda.energia_acumulada(E)[0].round(1))
-eda.plot_energia_acumulada(E)
-plt.show()
-""")
-md("""
-**Lectura.**
-- **La fundamental domina**: 99.9-100 % en resistivas, 96-98 % en `aire` y `heladera`, 82 % en `lavarropa`, y solo 42-53 % en `tele`, `luces` y `aireinverter`.
-- **El 99 % de lo demás está antes de ~1.15 kHz** en casi todas las clases. Las excepciones son `parasito` (1.35 kHz, ya casi en el piso) y `aireinverter` (1.97 kHz).
-- **Ojo con concluir "cortemos en 1.2 kHz"**: energía no es lo mismo que información. A9 muestra que hay armónicas de muy poca energía que separan clases.
-""")
-
-md("""
-## A8. Dónde hay señal y dónde solo ruido
-Potencia sobre el piso por banda (0 dB = igual que `nada`), y cuánta potencia cae fuera de las armónicas de 50 Hz.
-""")
-code("""
-eda.plot_snr_por_banda(E)
-plt.show()
-print("% de la potencia (sin fundamental, hasta 3 kHz) que cae entre armónicas:")
-print(eda.energia_interarmonica(E).to_string())
-""")
-md("""
-**Lectura: acá está lo que se puede descartar con seguridad.**
-- **Arriba de 3 kHz solo queda piso**: unos 0-5 dB en todas las clases, salvo `aireinverter` (23 dB entre 3 y 3.5 kHz). Coincide con el anti-alias de 2.2 kHz, que a 3 kHz ya atenúa 11 dB.
-- **Entre armónicas tampoco hay nada**: menos del 1 % de la potencia, salvo `aireinverter` con 17 %. El equipo de `depamica` tiene bandas laterales en 100 ± 17, 200 ± 15 y 300 ± 17 Hz, posiblemente ligadas a la velocidad del compresor, y el de `casa` el lomo de ~2 kHz.
-""")
-
-md("""
-## A9. Qué frecuencias separan a cada clase
-Tener energía no alcanza: una armónica sirve si **difiere de las demás clases**. Se compara cada clase contra el resto con el AUC, por armónica y con ráfagas como unidad: 1 = la clase siempre tiene más, 0 = siempre menos, 0.5 = no separa.
-
-Con tan pocas ráfagas, y mirando muchas armónicas a la vez, un AUC alto puede salir por azar. Por eso se marca con un **punto negro** lo que supera un test de permutación que corrige por todas las armónicas juntas (5 % de error por clase).
-
-Las clases se agrupan con `GRUPOS`. En combinadas se compara dentro de cada lugar, para no confundir la clase con la casa.
-""")
-code("""
-eda.plot_auc(E, GRUPOS)
-plt.show()
-display(eda.armonicas_significativas(E, GRUPOS))
-""")
-md("""
-**Lectura** (`+k`: la clase tiene más de esa armónica; `-k`: tiene menos).
-- **`resistiva`**: se define por H1 alta y por tener menos de casi todo lo demás. Coherente con A5: lo que queda es la red.
-- **`aire`**: sobre todo **H2, H4, H6 y H8**, armónicas pares y bajas (<400 Hz).
-- **`lavarropa`**: casi todas las **pares** de H8 en adelante, más H3. Es la clase que más gana con las pares.
-- **`luces`**: **impares** altas en forma (H3 en adelante), con poca fundamental y pocas pares. Sus ráfagas no son del todo independientes: varias son las mismas lámparas en otra configuración.
-- **`aireinverter`**: casi todo el rango alto, incluso en combinadas. Ojo: son 2 ráfagas individuales, y sus combinadas son todas del mismo equipo.
-- **`heladera`**: no tiene una franja propia; solo se destaca por tener menos que el resto.
-
-**El resultado más importante está en el panel de combinadas**: solo `aireinverter` y `resistiva` (H1) superan el azar. `heladera`, `lavarropa` y `luces` **no tienen ninguna armónica que por sí sola las delate en una mezcla real**. Esto no prueba que sean indetectables, porque un clasificador combina varias. De hecho, el modelo logra F1 0.91 con `lavarropa` en combinadas, y son dos máquinas distintas (A6). En cambio `heladera` (0.38) y `luces` (0.32) sí son las difíciles. Falta `aire`: en `depaleo` casi todas las combinadas lo tienen, y no hay contra qué compararlo.
-
-**Cuidado con la forma en armónicas altas**: dividir por H1 infla el piso en cargas chicas y lo achica en las grandes. Parte de los puntos de `luces` y `resistiva` por encima de k≈25 pueden ser ese efecto.
-""")
-
-md("""
-## A10. Parecidos entre clases
-Diferencia media en dB entre las firmas medianas de cada par de clases, ordenadas por agrupamiento jerárquico. Solo se escriben los valores chicos.
-""")
-code("""
-eda.plot_distancias(E)
-plt.show()
-display(eda.variacion_entre_lugares(E))
-""")
-md("""
-**Lectura.**
-- **En la forma aparecen tres familias sin habérselo pedido**: resistivas (2-4 dB entre sí), motores (`aire`, `airecalor`, `heladera`, 7-10 dB) y electrónica (`tele`, `luces`, `aireinverter`, 5-9 dB). `lavarropa` queda algo aparte (9-15 dB de los motores), y `parasito` no se puede ubicar con confianza porque está casi en el piso. Respalda agrupar las resistivas y la idea pendiente de clasificar por tipo eléctrico.
-- **`tele` y `luces` están a 5.2 dB**: probablemente son el mismo tipo de circuito, una fuente conmutada. Ayuda a explicar que `tele` aparezca como falso positivo.
-- **La tabla explica la dificultad de una casa nueva**: en `aireinverter` (11.3 dB contra 7.6), `luces` (7.6 contra 5.2) y `heladera` (7.7 contra 6.6) **una misma clase cambia más entre lugares que lo que la separa de su clase más parecida**. Ningún modelo puede resolver eso con estos datos: faltan más unidades de cada aparato.
-""")
-
-md("""
-## A11. Redundancia entre frecuencias
-Correlación de Spearman entre armónicas y PCA sobre el log del espectro, ambos por ráfaga. ¿Cuántas de las 614 variables aportan algo distinto?
-""")
-code("""
-eda.plot_correlacion(E)
-plt.show()
-display(eda.pca_resumen(E))
-eda.plot_pca(E, GRUPOS)
-plt.show()
-eda.plot_pca_cargas(E)
-plt.show()
-""")
-md("""
-**Lectura.**
-- **Hay mucha redundancia**: la mayoría de las armónicas se correlacionan fuerte entre sí, con un patrón de damero que separa pares de impares. Son dos grupos de variables, no 60 independientes.
-- **5 componentes explican el 90 % de la varianza y 10 el 95 %**, sobre 614 bins. Es una cota optimista porque son solo 51 ráfagas (máximo posible: 50 componentes), pero indica que mirar cientos de bins no agrega cientos de datos.
-- **Los ejes se interpretan físicamente**: PC1 (63 %) es el nivel general de contenido sobre el piso, con cargas del mismo signo en todo el espectro. PC2 contrasta baja frecuencia con alta y pares con impares. PC3 pesa casi solo las impares.
-- **Se ven las familias**: `aire` se separa bien, `resistiva` queda compacta y `luces` forma su propio grupo, con `tele` cerca, a pesar de sus distintas cantidades de lámparas. `lavarropa` está más dispersa, y `heladera` y `resistiva` caen cerca entre sí en este plano, porque 2 componentes no bastan. `aireinverter` son dos puntos lejanos, otra vez dos equipos muy distintos.
-""")
-
-md("""
-## A12. Distribución dentro de cada clase y outliers
+## A7. Distribución dentro de cada clase y outliers
 Cada muestra es un espectro de muchas dimensiones, así que un histograma por variable diría poco. La firma de cada captura se resume en sus 40 primeras armónicas (en dB y recortadas al piso de ruido), y se compara contra **el resto de su clase, sin su propia ráfaga**. La diferencia se separa en dos preguntas:
 
 - **Nivel**: ¿consume más o menos? Es la diferencia en H1. Con 6 dB, la corriente es el doble o la mitad.
@@ -332,19 +241,18 @@ Cada muestra es un espectro de muchas dimensiones, así que un histograma por va
 **Outlier no significa error.** Se revisan tres situaciones distintas:
 1. **Una captura que cambia dentro de su ráfaga** (6 dB de nivel u 8 dB de forma contra capturas tomadas segundos antes): cambio de estado o accidente.
 2. **Una ráfaga entera que difiere del resto de su clase**: es esperable, porque suele ser otro equipo u otra configuración. Sirve para ver la variedad real de la clase, no para buscar errores.
-3. **Una captura más cerca de otra clase que de la suya**: candidata a etiqueta dudosa. Las clases de un mismo grupo (`GRUPOS`) no compiten entre sí.
+3. **Una captura más cerca de otra clase que de la suya**: candidata a etiqueta dudosa.
 """)
 code("""
-D = eda.distribucion_muestras(E, GRUPOS)
+D = eda.distribucion_muestras(E)
 eda.plot_distribucion_clases(D)
 plt.show()
 """)
 md("""
 **Lectura.**
-- **Las más compactas**: `pava`, `plancha` y `airecalor`.
-- **Las más dispersas en nivel**: `luces` (de -8 a +14 dB, según cuántas lámparas haya), `lavarropa` (de -11 a +9 dB, según la etapa) y `aire`, con un equipo de `casa` a +8 dB.
+- **Las más dispersas en nivel**: `luces` (de -8 a +14 dB, según cuántas lámparas haya), `lavarropa` (de -11 a +9 dB, según la etapa), `aire` (hasta +8 dB, un equipo de `casa`) y `resistiva` (hasta -7 dB, el `horno` de `local`).
 - **La más dispersa en forma**: `aireinverter`, con todas sus capturas sobre el umbral.
-- **En resistivas, la forma no indica un problema**: sus ~5 dB vienen de las armónicas de la red (A5) y de que están cerca del piso. Lo que las distingue es el nivel: `horno` de `local` queda 6 dB abajo y `calefon` de `casa` 3 dB arriba, que son otros equipos.
+- **En `resistiva`, la forma no indica un problema**: sus ~4 dB vienen de las armónicas de la red y de que están cerca del piso.
 """)
 md("""
 ### Nivel contra forma, y qué revisar
@@ -381,23 +289,21 @@ md("""
 
 | Clase | Qué se ve | Interpretación |
 |---|---|---|
-| `lavarropa` | 0.43 A (#10), 2.6 A con THD 0.13 (#9), de 2.8 a 4.4 A dentro de una misma captura (#8) | etapas del ciclo |
-| `aireinverter` | en `casa`, 0.77, 1.7 y 1.8 A con formas distintas (#1 a #6); en `depamica`, un grupo compacto | el inverter cambia de régimen, y sus dos equipos no se parecen |
+| `lavarropa` | 0.43 A (#13), 2.6 A con THD 0.13 (#12), de 2.8 a 4.4 A dentro de una misma captura (#11) | etapas del ciclo |
+| `aireinverter` | en `casa`, 0.77, 1.7 y 1.8 A con formas distintas (#5 a #10); en `depamica`, un grupo compacto | el inverter cambia de régimen, y sus dos equipos no se parecen |
 | `heladera` | ~0.43 A con THD 0.19, y ~0.6-0.7 A con THD 0.12-0.17 | la corriente baja con el tiempo: 0.59 a 0.44 A en `depaleo` y 0.72 a 0.61 A en `local` |
 | `aire` | en `casa`, un equipo de 8.5 A y otro que sube de 2.8 a 4.2 A en 3 minutos | equipos de distinta potencia, y un régimen que todavía no se estabilizó |
 | `luces` | de 0.10 a 0.37 A en `depaleo` y hasta 0.88 A en `casa` | distinta cantidad de lámparas encendidas |
-| `parasito` | tres niveles de forma dentro de su única ráfaga (#16, #17) | variación chica de una señal cercana al piso |
 
 **Sobre las capturas "más cerca de otra clase".**
-- `luces` de `casa` (#14, #15) queda más cerca de `tele` que de las demás `luces`: coincide con que son el mismo tipo de circuito (A10).
-- `aireinverter` (#1, #5, #6, #7) no tiene una zona propia: sus equipos caen lejos entre sí.
-- `aire/20260912_174929` no está marcada, pero en el PCA se corre hacia `airecalor`. Mantiene los 8.35 A de su ráfaga, así que no parece una etiqueta cruzada.
+- `aire` #1 a #4 son el modo calor. Es casi un empate, con menos de 1 dB de diferencia: no alcanza para sospechar de ellas.
+- `aireinverter` #5, #9 y #10 no tienen una zona propia: sus equipos caen lejos entre sí.
 
 **Qué implica.**
 - **Una ráfaga no siempre es un solo estado**: `aireinverter` y `lavarropa` cambian dentro de la suya.
-- **Una clase no es una sola nube**: `lavarropa`, `heladera`, `aire` y `aireinverter` tienen varios regímenes. Conviene capturar y anotar el estado de la carga, y el tiempo desde que arrancó.
-- **El nivel no es una propiedad de la clase**: cada equipo tiene su potencia, y una casa nueva puede tener una potencia que el modelo nunca vio. La Parte B probó rangos de amplitud más amplios: en las mezclas no cambian nada, y por captura suben las individuales pero bajan el exact en combinadas.
-- **No conviene borrar nada más**: se eliminó la captura de 81 mA de `lavarropa`, y lo que queda son estados que el modelo va a encontrar en una casa real.
+- **Una clase no es una sola nube**: `lavarropa`, `heladera`, `aire` y `aireinverter` tienen varios regímenes. Conviene capturar y anotar el estado de la carga, y el tiempo desde que arrancó (`capturar.py --equipo --estado`).
+- **El nivel no es una propiedad de la clase**: cada equipo tiene su potencia, y una casa nueva puede tener una potencia que el modelo nunca vio.
+- **No conviene borrar nada más**: lo que queda son estados que el modelo va a encontrar en una casa real.
 """)
 md("""
 ### Las combinadas reales
@@ -409,84 +315,13 @@ eda.plot_distribucion_clases(DC)
 plt.show()
 display(eda.muestras_atipicas(DC))
 display(eda.rafagas_atipicas(DC))
+plt.rcdefaults()     # la Parte B usa el estilo por defecto de matplotlib
 """)
 md("""
 **Lectura.**
 - **La dispersión viene de `lavarropa`**: `lavarropa+luces` y `heladera+lavarropa+luces` van de -14 a +9 dB, porque el ciclo sigue cambiando dentro de la combinada. Todas sus marcas son compatibles con eso.
 - **`aireinverter+heladera+luces` es la de forma más variable** (8 dB de mediana), coherente con los regímenes del inverter.
 - **El resto es compacto**, y no aparece ninguna captura que sugiera una etiqueta equivocada. Ojo: esta vista compara cada captura con su propia combinación, así que no detectaría una combinación entera mal etiquetada.
-""")
-
-md("""
-## A13. Combinadas reales: ¿la firma de A+B es la suma de las firmas?
-Las mezclas sintéticas del pipeline suponen que sí, así que conviene medirlo. Cada combinada se compara con la suma de sus cargas medidas solas en el mismo lugar. Si las corrientes están en fase se suman en forma lineal; si tienen fases sin relación, se suman en cuadratura.
-""")
-code("""
-eda.plot_superposicion(E)
-plt.show()
-""")
-md("""
-**Lectura.**
-- **La fundamental suma lineal**: real / suma lineal = 1.02 en la mediana. Las cargas están casi en fase.
-- **Las armónicas no**: desde H3, las impares dan 0.74 contra la suma lineal y 0.97 contra la cuadrática. **Se comportan como si tuvieran fases sin relación**, porque cada carga tiene su propio ángulo en cada armónica.
-- **Para el pipeline**: las mezclas sintéticas alineadas por la fundamental ya reproducen este comportamiento (medido aparte contra la suma lineal: H1 1.00, impares 0.77, pares 0.83; las reales dan 1.02, 0.74 y 0.86), porque cada carga conserva sus propias fases de armónicas. La fase aleatoria, en cambio, subestima H1 (0.89).
-- **Dispersión grande**: `lavarropa` cambia de estado, así que la "carga sola" no siempre es la que estaba en la combinada. Los puntos muy por encima de la diagonal son de combinaciones con `lavarropa`.
-""")
-
-md("""
-### Visibilidad de una carga chica bajo una grande
-Para cada par: |H_k| de la carga S dividido por cuánto varía por sí sola esa armónica en la carga G, entre ventanas de una misma ráfaga. Se muestra la mejor armónica. Con margen menor a 1, lo que aporta S queda dentro de la fluctuación de G. Es una cota **optimista**: no incluye la variación entre unidades ni entre estados.
-""")
-code("""
-eda.plot_visibilidad(E)
-plt.show()
-""")
-md("""
-**Lectura.**
-- **`parasito` queda bajo la fluctuación** de cualquier motor o inverter (margen 0.1-0.3). Con esas cargas prendidas no se lo puede detectar. Sola, en cambio, se distingue del piso (fundamental de ~24 mA contra ~5 mA de `nada`).
-- **`heladera` está justo en el límite** bajo `aire`, `airecalor`, `lavarropa` y `aireinverter` (1.0-1.5). Coincide con su F1 de 0.38 en combinadas en casa nueva.
-- **`luces` bajo `aire` da margen 5.3**, y aun así su F1 en combinadas es 0.32. Físicamente se la puede ver: el problema es más bien que cada casa tiene otras lámparas (A10).
-- **Las resistivas se ven siempre**, en H1.
-""")
-
-md("""
-## A14. Síntesis: franjas por clase
-""")
-code("""
-display(eda.sintesis_franjas(E))
-display(eda.costo_franjas(E))
-plt.rcdefaults()     # la Parte B usa el estilo por defecto de matplotlib
-""")
-md("""
-**Respuesta a la pregunta inicial: qué franjas usar**
-
-| Clase | Qué la identifica | Franja candidata |
-|---|---|---|
-| `resistiva` | amplitud de la fundamental | 50 Hz. Lo demás es la distorsión de la red |
-| `aire` | fundamental y **armónicas pares bajas** | 50-400 Hz |
-| `lavarropa` | H3 y **armónicas pares** | pares; la energía termina ~450 Hz, la separación llega hasta 3 kHz |
-| `heladera` | sin franja propia; poco contenido alto | < 750 Hz |
-| `luces`, `tele` | **impares** altas | impares, 150 Hz a ~2 kHz |
-| `aireinverter` | contenido ancho, también entre armónicas | 0-3 kHz, **sin** restringirse a armónicas |
-
-**Lo que se puede descartar con buen respaldo**
-1. **Arriba de 3 kHz**: es piso de ruido en todas las clases salvo `aireinverter`.
-2. **Los bins entre armónicas**: menos del 1 % de la potencia, también salvo `aireinverter`.
-3. **H3 y superiores como firma de una resistiva**: reflejan la red de la casa.
-
-**Lo que NO conviene descartar**
-- **Las armónicas pares**: tienen poca energía, pero son lo que más separa a `aire` y `lavarropa`. Un filtro solo por impares o solo por energía las perdería.
-- **El rango entre 1.2 y 3 kHz**: casi no tiene energía, pero sí separación. Un barrido anterior de la Parte B también favorecía 3 kHz sobre 2 kHz (F1 0.686 contra 0.668), aunque por poco más que el ruido entre semillas.
-
-**Costo real en el ESP32-S3.** La FFT calcula todos los bins igual: elegir franjas **no ahorra FFT**, sino memoria y tamaño de los árboles. Como estimación, una FFT radix-2 de 2048 puntos cuesta ~45 mil multiplicaciones reales y Goertzel ~2 mil por bin, así que Goertzel solo conviene por debajo de ~22 bins, lo cual queda corto incluso para H1-H20 con tolerancia. Además, un Random Forest ya elige sus variables, y la Parte B lo confirmó: **quedarse solo con las armónicas no empeora ni reduce el modelo, y las franjas angostas por clase empeoran**.
-
-**Lo que limita más que las franjas.** Una misma clase cambia entre casas más de lo que la separa de otra (A10), y en mezclas reales `heladera` y `luces` no tienen una armónica que las delate por sí sola (A9). Ninguna selección de frecuencias resuelve eso: hacen falta más unidades de cada aparato.
-
-**Próximos pasos posibles**
-1. Sumar `aireinverter`, `heladera` y `luces` de otras casas.
-2. Capturar siempre corriente y tensión, para separar la distorsión de la red de la firma de la carga.
-
-Las franjas y la corrección de f0 ya se probaron en la sección 6 de la Parte B.
 """)
 
 md("""
@@ -612,7 +447,7 @@ print("\\nReferencia dentro de casas conocidas (sgkf5 por ráfaga, 3 semillas):"
 
 md("""
 ## 6. Barridos: hipótesis del EDA
-Cada variante es un `CFG.clonar(...)` corrido con `N_SEMILLAS_BARRIDO` semillas; el leaderboard guarda media y desvío. Cada grupo prueba algo que salió de la Parte A.
+Cada variante es un `CFG.clonar(...)` corrido con `N_SEMILLAS_BARRIDO` semillas; el leaderboard guarda media y desvío. Cada grupo prueba algo que salió del EDA.
 La tabla agrega la diferencia contra la base y su intervalo del 95 % por ráfagas (`comparar_bootstrap`). Si el intervalo incluye el 0, la diferencia no es evidencia.
 
 Este barrido es corto a propósito, porque en Colab cada variante tarda varios minutos. El script `tools/experimentos_eda.py` corre el barrido completo de la auditoría (franjas por clase, forma, red simulada, etc.) con más semillas.
@@ -695,7 +530,7 @@ De acá salió la base actual, `sesgo0_mix300` + `eje_f0`, a la que después se 
 - **La base es frágil ante la frecuencia de red**: corrigiendo el eje con la f0 estimada, el F1 casi no cambia en ±0.5 Hz. Es lo más importante para un producto real, y en condiciones nominales cuesta poco.
 
 **Hipótesis del EDA que no funcionaron.**
-- **Franjas angostas por clase** (A14): caen, exact -0.14. Con franjas amplias da lo mismo que la base. Solo armónicas no pierde nada, pero tampoco reduce los nodos.
+- **Franjas angostas por clase**: caen, exact -0.14. Con franjas amplias da lo mismo que la base. Solo armónicas no pierde nada, pero tampoco reduce los nodos.
 - **Solo impares**: bajan las individuales. Confirma que las pares importan.
 - **Features de forma + H1**: empeoran. El nivel sigue siendo información útil.
 - **Escala más amplia**: en las mezclas no cambia nada. Por captura sube las individuales (+0.06 con ±2.5×) y baja exact en combinadas.
