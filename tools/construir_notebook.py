@@ -199,7 +199,7 @@ md("""
 
 md("""
 ## A5. Todas las clases superpuestas
-Cada clase tiene siempre el mismo color. Primero el rango completo y después por rangos de 1000 Hz y de 500 Hz. Cada rango tiene su propia escala vertical, porque si no H1 aplasta a todo lo demás.
+Cada clase tiene siempre el mismo color. Primero el rango completo y después por rangos de 1000 Hz. Cada rango tiene su propia escala vertical, porque si no H1 aplasta a todo lo demás.
 """)
 code("""
 eda.plot_fft_superpuestas(F, escala="log")
@@ -210,19 +210,11 @@ eda.plot_fft_superpuestas(F, escala="log", paso=1000.0)
 plt.show()
 """)
 code("""
-eda.plot_fft_superpuestas(F, escala="log", paso=500.0)
-plt.show()
-""")
-code("""
 eda.plot_fft_superpuestas(F, escala="lin")
 plt.show()
 """)
 code("""
 eda.plot_fft_superpuestas(F, escala="lin", paso=1000.0)
-plt.show()
-""")
-code("""
-eda.plot_fft_superpuestas(F, escala="lin", paso=500.0)
 plt.show()
 """)
 md("""
@@ -266,19 +258,11 @@ eda.plot_combinada(C, escala="log", paso=1000.0)
 plt.show()
 """)
 code("""
-eda.plot_combinada(C, escala="log", paso=500.0)
-plt.show()
-""")
-code("""
 eda.plot_combinada(C, escala="lin")
 plt.show()
 """)
 code("""
 eda.plot_combinada(C, escala="lin", paso=1000.0)
-plt.show()
-""")
-code("""
-eda.plot_combinada(C, escala="lin", paso=500.0)
 plt.show()
 plt.rcdefaults()     # la Parte B usa el estilo por defecto de matplotlib
 """)
@@ -314,8 +298,11 @@ sen, Y, G = ds.senales(), ds.y(), ds.grupos()
 
 md("""
 ## 2. Configuración base
-`Config` es la única fuente de verdad. Base (2026-11-04): **FFT cruda** (solo los 614 bins directos de la FFT de W=2048 hasta 3 kHz) **con el eje corregido por la f0 estimada** de cada ventana,
-sin augment, 300 mezclas sintéticas por fold con todas las combinaciones por igual (solo para entrenar), OvR de RandomForest 20×8.
+`Config` es la única fuente de verdad. Hay dos bases, que se corren siempre juntas:
+- **Base (`CFG`)**: solo los bins de la FFT a **±2 de cada armónico**, pares e impares (299 features de W=2048, hasta 3 kHz).
+- **Referencia (`CFG_BINS`)**: todos los bins hasta 3 kHz (614 features).
+
+Ambas corrigen el eje con la f0 estimada de cada ventana, sin augment, con 300 mezclas sintéticas por fold con todas las combinaciones por igual (solo para entrenar), y usan OvR de RandomForest 20×8.
 El test son siempre capturas reales; la validación por default es leave-one-lugar-out (casa nunca vista).
 **Las clases con pocas muestras se descartan hasta tener más** (menos de 3 capturas o menos de 2 ráfagas: hoy `hidro`, `secadorpelo` y `tele`).
 `AGRUPAR` fusiona clases físicamente indistinguibles (resistivas puras de ~6 A: misma amplitud, THD ≈ 0.02);
@@ -327,7 +314,9 @@ AGRUPAR = {"calefon": "resistiva", "horno": "resistiva", "pava": "resistiva", "p
            "airecalor": "aire"}          # aire y airecalor = el mismo equipo en dos modos
 EXCLUIR = ("parasito",)                  # standby: se medirá como consumo base, no se clasifica
 CFG = Config(agrupar=AGRUPAR, excluir_clases=EXCLUIR)
-print(CFG.nombre())
+CFG_BINS = CFG.clonar(rawfft_armonicas_tol=None)
+print("base:", CFG.nombre())
+print("referencia:", CFG_BINS.nombre())
 pd.Series({k: v for k, v in CFG.to_dict().items() if k != "bandas_hz"}).to_frame("valor").T
 """)
 
@@ -392,105 +381,76 @@ se entrena sin un lugar y se evalúan las individuales **y** las combinadas de e
   **una diferencia menor que el desvío no es evidencia**. Para comparar dos configs usá `comparar(a, b)` (pareado por semilla) y
   `comparar_bootstrap(ds, a, b)`: su intervalo remuestrea ráfagas del test, porque el desvío entre semillas no mide cuánto depende el
   resultado de qué ocasiones se midieron. Ninguno de los dos mide la variación entre casas, porque hay solo 4 lugares.
-- Referencia dentro de las casas conocidas: `cv="sgkf5"` agrupado por **ráfaga** (capturas casi idénticas nunca se reparten
-  entre train y test). El CV por captura que usábamos antes era optimista.
 - Los umbrales por clase (`+umbr`) empeoran bajo validación honesta: se usa umbral fijo 0.5.
 """)
 code("""
 LEADERBOARD = os.path.join(RUTA_SALIDAS, "leaderboard.csv")
 N_SEMILLAS = 5
 rep = run_repetido(ds, CFG, n_semillas=N_SEMILLAS, leaderboard=LEADERBOARD, etiqueta="base")
+rep_bins = run_repetido(ds, CFG_BINS, n_semillas=N_SEMILLAS, leaderboard=LEADERBOARD, etiqueta="todos_los_bins")
 res = rep.resultados[0]
-print(f"LOLO, {N_SEMILLAS} semillas (media ± desvío):")
-for k in ("ind_s_f1_micro", "comb_s_f1_micro", "comb_s_exact_match", "todas_s_f1_micro", "todas_c_f1_micro"):
-    if k in rep.media:
-        print(f"  {k:22s} {rep.media[k]:.3f} ± {rep.desvio[k]:.3f}")
+print(f"LOLO, {N_SEMILLAS} semillas (media ± desvío){'':3s}{'base (±2 bins)':>16s}{'todos los bins':>16s}")
+for k in ("ind_s_f1_micro", "comb_s_f1_micro", "comb_s_exact_match", "todas_s_f1_micro", "nodos_totales"):
+    fmt = (lambda r: f"{r.media[k]:.0f}") if k == "nodos_totales" else (lambda r: f"{r.media[k]:.3f} ± {r.desvio[k]:.3f}")
+    print(f"  {k:36s}{fmt(rep):>16s}{fmt(rep_bins):>16s}")
+print("\\ntodos los bins contra la base:", {k: v for k, v in comparar_bootstrap(ds, rep, rep_bins).items() if k in ("dif_f1", "ic95_f1", "dif_exact", "ic95_exact")})
 print("\\nDetalle de la semilla 0:\\n" + reporte(res.metricas, res.clases))
 if "comb" in res.bloques:
     print("\\nCombinadas reales por combinación (casa no vista, umbral 0.5):")
     print(reporte_combinaciones(res.bloques["comb"], res.clases, 0.5))
-ref = run_repetido(ds, CFG.clonar(cv="sgkf5", cv_grupo="rafaga"), n_semillas=3, etiqueta="base_sgkf_rafaga")
-print("\\nReferencia dentro de casas conocidas (sgkf5 por ráfaga, 3 semillas):",
-      {k: f"{ref.media[k]:.3f} ± {ref.desvio[k]:.3f}" for k in ("ind_s_f1_micro", "comb_c_f1_micro", "comb_c_exact_match")})
 """)
 
 md("""
-## 6. Barridos: hipótesis del EDA
-Cada variante es un `CFG.clonar(...)` corrido con `N_SEMILLAS_BARRIDO` semillas; el leaderboard guarda media y desvío. Cada grupo prueba algo que salió del EDA.
-La tabla agrega la diferencia contra la base y su intervalo del 95 % por ráfagas (`comparar_bootstrap`). Si el intervalo incluye el 0, la diferencia no es evidencia.
+## 6. Barridos
+Cada variante es un `CFG.clonar(...)` corrido con `N_SEMILLAS_BARRIDO` semillas. La tabla agrega la diferencia contra la base y su intervalo del 95 % por ráfagas: si incluye el 0, la diferencia no es evidencia.
 
-Este barrido es corto a propósito, porque en Colab cada variante tarda varios minutos. El script `tools/experimentos_eda.py` corre el barrido completo de la auditoría (franjas por clase, forma, red simulada, etc.) con más semillas.
+Este barrido es corto a propósito. Sumá acá lo que quieras probar. El barrido completo (franjas, tamaños de FFT, mezclas, augment...) se corre con `tools/experimentos_eda.py`, y sus resultados están en las tablas de abajo.
 """)
 code("""
 N_SEMILLAS_BARRIDO = 3
-BASE_ANTERIOR = dict(mix_sesgo_grande_chica=0.5, mix_total=100, rawfft_f0=False)     # sin contar el descarte de clases
 variantes = {
-    # --- de dónde viene la base actual
-    "base_anterior":   CFG.clonar(**BASE_ANTERIOR),
-    "sin_eje_f0":      CFG.clonar(rawfft_f0=False),
-    "con_sesgo":       CFG.clonar(mix_sesgo_grande_chica=0.5),
-    "mix100":          CFG.clonar(mix_total=100),
-    # --- la otra candidata de la auditoría y sus partes
-    "rafaga_hoja5":    CFG.clonar(**BASE_ANTERIOR, mix_por_rafaga=True, hiperparams={"min_samples_leaf": 5}),
-    "por_rafaga":      CFG.clonar(mix_por_rafaga=True),
-    "hoja5":           CFG.clonar(hiperparams={"min_samples_leaf": 5}),
-    # --- franjas de frecuencia
-    "solo_armonicas":  CFG.clonar(rawfft_mascara="armonicas"),
-    "fmax2000":        CFG.clonar(rawfft_fmax=2000.0),
-    # --- nivel por equipo
-    "train_escala1.6": CFG.clonar(train_escala=(0.6, 1.6)),
-    # --- referencia
-    "sin_mix":         CFG.clonar(mix_habilitado=False),
+    "arm_tol1":    CFG.clonar(rawfft_armonicas_tol=1),         # armónicos con ±1 bin
+    "sin_eje_f0":  CFG.clonar(rawfft_f0=False),
+    "extras":      CFG.clonar(rawfft_extras=True),
+    "mix100":      CFG.clonar(mix_total=100),
+    "mismo_lugar": CFG.clonar(mix_mismo_lugar=True),           # cargas de una misma casa, si existen juntas
+    "desfase30":   CFG.clonar(mix_jitter_fase=30.0),           # ángulo aleatorio de ±30° entre cargas
+    "cadena":      CFG.clonar(multi_salida="cadena"),          # cada bosque recibe la salida de los anteriores
 }
-PROYECCION = {}
-NO_COMPARABLES = ()
-reps = {"base": rep}
+reps = {"base": rep, "todos_los_bins": rep_bins}
 filas = []
 for nombre, c in variantes.items():
     r = run_repetido(ds, c, n_semillas=N_SEMILLAS_BARRIDO, leaderboard=LEADERBOARD, etiqueta=nombre)
     reps[nombre] = r
-    f = {"variante": nombre, "todas_s": r.media["todas_s_f1_micro"], "comb_s": r.media["comb_s_f1_micro"],
-         "comb_exact": r.media["comb_s_exact_match"], "ind_s": r.media["ind_s_f1_micro"], "nodos": round(r.media["nodos_totales"])}
-    if nombre not in NO_COMPARABLES:
-        t = comparar_bootstrap(ds, rep, r, "todas", mapa_a=PROYECCION.get(nombre))
-        k = comparar_bootstrap(ds, rep, r, "comb", mapa_a=PROYECCION.get(nombre))
-        f.update(dif_todas=t["dif_f1"], ic_todas=t["ic95_f1"], dif_comb=k["dif_f1"], ic_comb=k["ic95_f1"], dif_exact=k["dif_exact"], ic_exact=k["ic95_exact"])
-    filas.append(f)
-    print(f"{nombre:18s} todas {f['todas_s']:.3f}  comb {f['comb_s']:.3f}  exact {f['comb_exact']:.3f}  nodos {f['nodos']}", flush=True)
-tabla_barrido = pd.DataFrame(filas).set_index("variante").round(3).sort_values("dif_todas", ascending=False)
-display(tabla_barrido)
-""")
-code("""
-# Solo filas de este dataset: el leaderboard puede traer corridas viejas si se persiste entre sesiones
-lb = cargar_leaderboard(LEADERBOARD, ordenar_por="todas_s_f1_micro")
-lb = lb[lb["manifest"] == ds.manifest_hash[:10]]
-cols = ["etiqueta", "nombre", "todas_s_f1_micro", "todas_s_f1_micro_std", "comb_s_f1_micro", "comb_s_exact_match",
-        "ind_s_f1_micro", "nodos_totales", "n_semillas"]
-display(lb[[c for c in cols if c in lb.columns]].head(20))
-plots.plot_leaderboard(lb, y="todas_s_f1_micro", y2="comb_s_f1_micro")
-plt.show()
+    t, k = comparar_bootstrap(ds, rep, r, "todas"), comparar_bootstrap(ds, rep, r, "comb")
+    filas.append({"variante": nombre, "todas_s": r.media["todas_s_f1_micro"], "comb_s": r.media["comb_s_f1_micro"],
+                  "comb_exact": r.media["comb_s_exact_match"], "ind_s": r.media["ind_s_f1_micro"], "nodos": round(r.media["nodos_totales"]),
+                  "dif_todas": t["dif_f1"], "ic_todas": t["ic95_f1"], "dif_comb": k["dif_f1"], "ic_comb": k["ic95_f1"],
+                  "dif_exact": k["dif_exact"], "ic_exact": k["ic95_exact"]})
+display(pd.DataFrame(filas).set_index("variante").round(3).sort_values("dif_todas", ascending=False))
 """)
 md("""
 ### Robustez a la frecuencia de red
-Los datos se midieron con la red entre 49.91 y 50.11 Hz. Acá se simula otra frecuencia en las capturas de test. `eje_f0` estima la f0 de cada ventana y corrige el eje.
+Los datos se midieron con la red entre 49.91 y 50.11 Hz. Acá se simula otra frecuencia en las capturas de test. `sin_eje_f0` no corrige el eje con la f0 estimada.
 """)
 code("""
 filas = {}
 for nombre, c in (("base", CFG), ("sin_eje_f0", variantes["sin_eje_f0"])):
     filas[nombre] = {f"{d:+.1f} Hz": run_repetido(ds, c.clonar(test_f0_hz=d), n_semillas=N_SEMILLAS_BARRIDO).media["todas_s_f1_micro"]
-                     for d in (-0.5, 0.0, 0.5)}
+                     for d in (-0.5, 0.5)}
+    filas[nombre]["red real"] = reps[nombre].media["todas_s_f1_micro"]
 display(pd.DataFrame(filas).T.round(3))
 """)
 md("""
 ### Resultados de la auditoría (dataset `dfe60d02ca`, 2026-11-04)
-De acá salió la base actual, `sesgo0_mix300` + `eje_f0`, a la que después se le sacó `tele` por tener una sola ráfaga. Esta tabla es previa a ese descarte. Validación por lugar, clases vistas. Base anterior: todas 0.708, individuales 0.743, combinadas 0.683, combinadas exact 0.277, 9.2 k nodos (10 semillas). Entre paréntesis, el intervalo del 95 % por ráfagas.
+De acá salió `sesgo0_mix300` + `eje_f0`, a la que después se le sacó `tele`, por tener una sola ráfaga, y se le dejaron solo los armónicos. Esta tabla es previa a esos dos cambios. Validación por lugar, clases vistas. Base anterior: todas 0.708, individuales 0.743, combinadas 0.683, combinadas exact 0.277, 9.2 k nodos (10 semillas). Entre paréntesis, el intervalo del 95 % por ráfagas.
 
 | Candidata (10 semillas) | Δ todas | Δ combinadas | Δ exact comb. | Δ exact ind. | Nodos | F1 con f0 ±0.5 Hz | Export |
 |---|---|---|---|---|---|---|---|
 | Base anterior | - | - | - | - | 9.2 k | 0.58 / 0.46 | sí |
 | `rafaga_hoja5` | +0.028 (0.012, 0.045) | +0.031 (0.009, 0.053) | +0.016 (-0.026, 0.066) | +0.014 (-0.010, 0.044) | 7.4 k | 0.62 / 0.56 | sí |
 | `sesgo0_mix300` | +0.033 (0.006, 0.059) | +0.063 (0.029, 0.097) | +0.108 (0.021, 0.209) | -0.054 (-0.115, -0.004) | 15.5 k | 0.65 / 0.55 | sí |
-| **`sesgo0_mix300` + `eje_f0` (base actual)** | +0.024 (-0.002, 0.050) | +0.050 (0.015, 0.086) | +0.094 (0.009, 0.188) | -0.050 (-0.106, -0.003) | 15.2 k | 0.73 / 0.73 | sí |
+| **`sesgo0_mix300` + `eje_f0`** | +0.024 (-0.002, 0.050) | +0.050 (0.015, 0.086) | +0.094 (0.009, 0.188) | -0.050 (-0.106, -0.003) | 15.2 k | 0.73 / 0.73 | sí |
 | `rafaga_hoja5` + `eje_f0` | +0.012 (-0.002, 0.029) | +0.012 (-0.008, 0.033) | +0.016 (-0.031, 0.074) | +0.011 (-0.017, 0.042) | 7.3 k | 0.71 / 0.70 | sí |
 
 **Lectura.**
@@ -512,14 +472,66 @@ De acá salió la base actual, `sesgo0_mix300` + `eje_f0`, a la que después se 
 """)
 
 md("""
+### Tamaño de FFT, features extra y solo armónicos (2026-11-06)
+Validación por lugar, 5 semillas, contra la referencia con todos los bins: todas 0.786, combinadas 0.814, exact en combinadas 0.464, individuales 0.745, 12.6 k nodos. Entre paréntesis, el intervalo del 95 % por ráfagas.
+
+| Variante | Features | Δ todas | Δ combinadas | Δ exact comb. | Δ individuales | Nodos |
+|---|---|---|---|---|---|---|
+| `W4096` | 1228 | -0.016 (-0.036, 0.003) | -0.029 (-0.054, -0.007) | -0.011 | +0.004 | 8.7 k |
+| `W8192` | 2457 | -0.132 (-0.178, -0.093) | -0.156 (-0.211, -0.108) | -0.243 | -0.097 | 5.5 k |
+| `nfft4096` (W=2048 + ceros) | 1228 | 0.000 (-0.012, 0.013) | +0.002 (-0.012, 0.015) | +0.016 | -0.002 | 12.1 k |
+| `nfft8192` (W=2048 + ceros) | 2457 | +0.005 (-0.009, 0.018) | +0.003 (-0.012, 0.019) | -0.013 | +0.006 | 11.4 k |
+| `extras` | 637 | +0.006 (-0.008, 0.019) | +0.002 (-0.018, 0.019) | +0.020 | +0.011 | 11.2 k |
+| Armónicos, W=2048, ±0 bins | 60 | -0.019 (-0.045, 0.009) | -0.009 (-0.042, 0.026) | -0.030 | -0.031 | 14.9 k |
+| Armónicos, W=2048, ±1 bin | 180 | -0.014 (-0.037, 0.009) | -0.008 (-0.039, 0.022) | -0.025 | -0.021 | 13.6 k |
+| **Armónicos, W=2048, ±2 bins (base actual)** | **299** | **-0.002 (-0.018, 0.015)** | **-0.001 (-0.019, 0.020)** | **+0.005** | **-0.003** | **13.0 k** |
+| Armónicos, W=4096, ±0 / ±1 / ±2 | 59 / 178 / 297 | -0.030 / -0.007 / -0.008 | -0.026 / -0.001 / -0.004 | -0.107 / -0.034 / -0.032 | -0.033 / -0.017 / -0.013 | 10.3 / 8.8 / 8.7 k |
+| Armónicos, W=8192, ±0 / ±1 / ±2 | 59 / 178 / 297 | -0.063 / -0.032 / -0.032 | -0.054 / -0.032 / -0.037 | -0.198 / -0.120 / -0.132 | -0.075 / -0.032 / -0.024 | 6.5 / 5.3 / 5.3 k |
+| Armónicos ±1 + extras, W=2048 | 203 | +0.007 (-0.012, 0.027) | -0.002 (-0.028, 0.024) | -0.021 | +0.021 | 11.4 k |
+| Armónicos ±1 + extras, W=4096 | 201 | +0.004 (-0.015, 0.023) | -0.001 (-0.028, 0.026) | -0.023 | +0.011 | 7.7 k |
+| Armónicos ±1 + extras, W=8192 | 201 | -0.004 (-0.024, 0.017) | -0.003 (-0.029, 0.026) | -0.075 | -0.006 | 4.9 k |
+
+**Lectura.**
+- **Una ventana más larga no ayuda, y con 8192 empeora mucho.** En capturas de 1 s, 8192 deja una sola ventana por captura en lugar de 8, así que hay menos datos y menos promediado. Con menos muestras por captura, los árboles también quedan más chicos. Además harían falta 0.8 s por decisión.
+- **Completar con ceros no cambia nada**: no agrega información, y multiplica los features por 2 o por 4.
+- **Solo armónicos con ±2 bins rinde igual que usar todos los bins, con la mitad de features** (299 contra 614), y por eso es la base. Con ±1 y ±0 pierde un poco, sobre todo en individuales. No reduce los nodos: el bosque usa los features que necesita.
+- **Las pares no se perdieron**: esta máscara incluye pares e impares, y antes se vio que quedarse solo con impares empeora.
+- **Los extras casi no cambian el total, pero compensan quedarse solo con ±1 bin**: suben las individuales, y bajan los nodos. Con W=4096 quedan 7.7 k nodos, con el costo de una ventana el doble de larga. Hoy no se exportan a C.
+- **Robustez**: con la red corrida ±0.5 Hz, todas estas variantes con corrección de f0 se mantienen estables.
+
+**Export**: las variantes de armónicos sin extras ya se exportan (`NILM_RAWFFT_BINS`), con 100 % de decisiones iguales entre C y Python partiendo del mismo espectro. Para W=2048 y ±2 bins: 13.5 k nodos, 158 KB. Se probaron ~20 variantes más sobre las mismas casas: la base cambió por simplicidad, no porque rinda más.
+""")
+
+md("""
+### Mezclas por lugar, desfase y clasificador en cadena (2026-11-06)
+Validación por lugar, 5 semillas, contra la base de armónicos ±2 bins: todas 0.785, combinadas 0.813, exact en combinadas 0.470, individuales 0.742, 13.0 k nodos. Entre paréntesis, el intervalo del 95 % por ráfagas.
+
+| Variante | Δ todas | Δ combinadas | Δ exact comb. | Δ individuales | Nodos |
+|---|---|---|---|---|---|
+| Armónicos ±1 bin | -0.012 (-0.026, 0.003) | -0.008 (-0.028, 0.015) | -0.030 (-0.074, 0.013) | -0.018 | 13.6 k |
+| Mezclas de una misma casa | -0.018 (-0.031, -0.005) | -0.021 (-0.037, -0.005) | -0.066 (-0.122, -0.013) | -0.013 | 11.5 k |
+| Desfase ±15° | -0.004 (-0.019, 0.011) | -0.006 (-0.023, 0.009) | -0.032 (-0.100, 0.033) | +0.001 | 13.3 k |
+| Desfase ±30° | -0.010 (-0.023, 0.001) | -0.011 (-0.025, 0.002) | -0.050 (-0.108, 0.003) | -0.009 | 13.2 k |
+| Desfase ±45° | -0.007 (-0.020, 0.007) | -0.007 (-0.024, 0.009) | -0.054 (-0.123, 0.013) | -0.005 | 13.4 k |
+| Cadena, grandes primero | 0.000 (-0.010, 0.012) | 0.000 (-0.014, 0.015) | -0.011 (-0.039, 0.019) | +0.002 | 13.0 k |
+| Cadena, chicas primero | -0.001 (-0.010, 0.007) | -0.002 (-0.013, 0.008) | -0.009 (-0.063, 0.034) | 0.000 | 13.0 k |
+
+**Lectura.** Ninguna supera a la base.
+- **Mezclas de una misma casa: empeora.** La variedad de cruzar equipos de casas distintas parece valer más que respetar la red de cada una.
+- **Desfase aleatorio: no sirve.** Tampoco corrige bien el error de H3 de A6: en `heladera+luces` baja de 13.5 a 11.5 dB con ±30° y a 8.6 dB con ±45°. Haría falta el ángulo real de cada carga, que solo se puede medir con la tensión.
+- **Cadena: no cambia nada.** Saber qué otras cargas predijo el modelo no le agrega información.
+- **Las combinaciones entre estas variantes tampoco ayudan.** Las que incluyen mezclas de una misma casa o desfase quedan por debajo de la base (todas entre -0.013 y -0.021).
+""")
+
+md("""
 ## 7. Evaluación del elegido
 Elegí `MEJOR` a mano: solo cambiá la base si la mejora es mayor al desvío, en casi todas las semillas, y su intervalo de `comparar_bootstrap` excluye el 0.
 Si no, quedate con la base. `franjas`, `forma_h1` y `filtro_corriente` todavía no se pueden exportar a C. Las matrices por clase son del LOLO (casa no vista), con umbral 0.5.
 """)
 code("""
-MEJOR = CFG            # o: Config.from_json(lb.iloc[0]["config"])
+MEJOR = CFG            # o CFG_BINS, o una variante del barrido
 print("MEJOR:", MEJOR.nombre())
-res_m = run_experiment(ds, MEJOR, verbose=False)
+res_m = rep.resultados[0] if MEJOR is CFG else run_experiment(ds, MEJOR, verbose=False)
 print(reporte(res_m.metricas, res_m.clases))
 """)
 code("""
@@ -550,10 +562,6 @@ assert paridad["paridad_ok"], "el C exportado NO reproduce a sklearn: no flashea
 paridad_f = test_paridad_features(CARPETA_EXPORT, sen, MEJOR, fs, modelo)
 print(paridad_f)
 assert paridad_f["acuerdo_decisiones"] == 1.0, "las features en C cambian decisiones del modelo: no flashear"
-rob = robustez_snr(modelo, ds, MEJOR)
-print("robustez SNR (sobre datos de entrenamiento: mide degradación relativa):", {k: round(v, 3) for k, v in rob.items()})
-plots.plot_robustez(rob)
-plt.show()
 print("archivos en", CARPETA_EXPORT, ":", sorted(os.listdir(CARPETA_EXPORT)))
 """)
 

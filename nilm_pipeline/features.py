@@ -31,6 +31,8 @@ Precisión medida con senoidal sintética (W=1024..4096): f0 ±0.08 Hz y |H1|
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 from scipy import stats
 from scipy.signal import windows
@@ -138,8 +140,34 @@ def _tiempo(V: np.ndarray, escala: np.ndarray) -> np.ndarray:
     return np.column_stack([rms * escala, pico * escala, cresta, zcr, curt, asim])
 
 
+@lru_cache(maxsize=32)
+def _sesgo_f0(W: int, n_fft: int, ventana: str, fs: float, f_red: float) -> float:
+    """Cuánto lee de más estimar_f0 con esta ventana y esta FFT, medido sobre un seno de f_red.
+    Con W = n_fft = 2048 son +0.074 Hz; con más puntos de FFT es casi cero."""
+    t = np.arange(W) / fs
+    w = ventana_fft(ventana, W)
+    x = np.sin(2 * np.pi * f_red * t)
+    mag = (2 * np.abs(np.fft.rfft((x - x.mean()) * w, n=n_fft)) / w.sum())[None, :].astype(np.float32)
+    return float(estimar_f0(mag, np.fft.rfftfreq(n_fft, 1.0 / fs).astype(np.float32), f_red)[0]) - f_red
+
+
+def _bins_armonicas(cfg: Config, fs: float) -> np.ndarray:
+    """Bins a ±rawfft_armonicas_tol de cada armónica, pares e impares. Con el eje corregido por f0, el sesgo
+    del estimador deja cada armónica un poco antes de k·f_red, y hay que elegir el bin donde cae realmente."""
+    n_fft = cfg.n_fft_efectivo
+    df = fs / n_fft
+    sesgo = _sesgo_f0(cfg.W, n_fft, cfg.ventana, fs, cfg.f_red) if cfg.rawfft_f0 else 0.0
+    bins = set()
+    for k in range(1, int(cfg.rawfft_fmax // cfg.f_red) + 1):
+        centro = int(round(k * cfg.f_red / df * (1 - sesgo / cfg.f_red)))
+        bins.update(range(centro - cfg.rawfft_armonicas_tol, centro + cfg.rawfft_armonicas_tol + 1))
+    return np.array(sorted(b for b in bins if 0 < b * df <= cfg.rawfft_fmax))
+
+
 def bins_rawfft(cfg: Config, fs: float) -> np.ndarray:
     """Índices de bin de la FFT usados por rawfft: 1..k con k·fs/n_fft <= rawfft_fmax."""
+    if cfg.rawfft_armonicas_tol is not None:
+        return _bins_armonicas(cfg, fs)
     freqs = np.fft.rfftfreq(cfg.n_fft_efectivo, d=1.0 / fs)
     bins = (freqs > 0) & (freqs <= cfg.rawfft_fmax)
     if cfg.rawfft_mascara != "todos":
@@ -173,10 +201,29 @@ def _mag_alineada(mag: np.ndarray, freqs: np.ndarray, f_red: float) -> np.ndarra
     return (1 - d) * np.take_along_axis(mag, i, axis=1) + d * np.take_along_axis(mag, i + 1, axis=1)
 
 
+NOMBRES_EXTRAS = ("rms_A", "pico_A", "cresta", "zcr", "curtosis", "asimetria", "h1_A", "thd", "par_impar", "frac_armonica",
+                  "centroide_hz", "dispersion_hz", "rolloff85_hz", "rolloff95_hz", "planitud", "entropia")
+
+
+def _extras(V: np.ndarray, escala: np.ndarray, mag: np.ndarray, freqs: np.ndarray, cfg: Config) -> np.ndarray:
+    """Escalares que no son bins: los de `compact`, sin las armónicas una por una."""
+    f0 = estimar_f0(mag, freqs, cfg.f_red)
+    H = armonicas(mag, freqs, f0, cfg.n_armonicas, cfg.armonica_tol_bins).astype(np.float64)
+    h1, resto = H[:, 0], H[:, 1:]
+    thd = np.sqrt((resto ** 2).sum(axis=1)) / (h1 + _EPS)
+    par_impar = H[:, 1::2].sum(axis=1) / (H[:, 2::2].sum(axis=1) + _EPS)
+    ptot = (mag[:, 1:].astype(np.float64) ** 2).sum(axis=1) + _EPS
+    frac = np.clip((H ** 2).sum(axis=1) / ptot, 0.0, 1.0)
+    return np.column_stack([_tiempo(V, escala), h1 * escala, thd, par_impar, frac, _estadisticos_espectrales(mag, freqs),
+                            _bandas(mag, freqs, cfg.bandas_hz)])
+
+
 def nombres_features(cfg: Config, fs: float = 10000.0) -> list:
     if cfg.estrategia == "rawfft":
         df = fs / cfg.n_fft_efectivo
         n = [f"fft_{k * df:.2f}Hz" for k in bins_rawfft(cfg, fs)]
+        if cfg.rawfft_extras:
+            n = n + list(NOMBRES_EXTRAS) + [f"banda_{lo:.0f}_{hi:.0f}" for lo, hi in zip(cfg.bandas_hz[:-1], cfg.bandas_hz[1:])]
         return ["h1_A"] + n if cfg.rawfft_norm == "h1" else n
     nombres = ["rms_A", "pico_A", "cresta", "zcr", "curtosis", "asimetria", "h1_A"]
     suf = "_rel" if cfg.normalizar_forma else "_A"
@@ -199,9 +246,12 @@ def extraer_features(V: np.ndarray, escala: np.ndarray, cfg: Config, fs: float,
     nombres = nombres_features(cfg, fs)
 
     if cfg.estrategia == "rawfft":
+        extras = _extras(V, escala, mag, freqs, cfg) if cfg.rawfft_extras else None
         if cfg.rawfft_f0:
             mag = _mag_alineada(mag, freqs, cfg.f_red)
         F = mag[:, bins_rawfft(cfg, fs)] * escala[:, None]
+        if extras is not None:
+            F = np.hstack([F, extras])
         if cfg.rawfft_norm == "h1":
             cerca = (freqs > 0.8 * cfg.f_red) & (freqs < 1.2 * cfg.f_red)
             h1 = mag[:, cerca].max(axis=1, keepdims=True) * escala[:, None]

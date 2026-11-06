@@ -30,7 +30,7 @@ FILTROS = (None, "hp", "lp", "bp", "notch")
 NORMALIZACIONES = (None, "rms", "maxabs")
 CVS = ("lolo", "sgkf5", "logo")
 CV_GRUPOS = ("rafaga", "sesion", "captura")
-MULTI_SALIDAS = ("ovr", "nativo")
+MULTI_SALIDAS = ("ovr", "nativo", "cadena")
 
 
 def _es_potencia_de_2(n: int) -> bool:
@@ -92,6 +92,8 @@ class Config:
                                     # (con f_red el error de fase mediano es 12.5°, hasta 40°)
     mix_armonicas_azar: bool = False  # fase propia al azar en cada armónica de cada carga:
                                     # H1 sigue alineada; desde H2 suman sin relación, como en las reales
+    mix_mismo_lugar: bool = False   # si las cargas elegidas existen juntas en algún lugar, mezclarlas de ese lugar: en una
+                                    # casa real comparten la red. Si no, se mezclan de lugares distintos para no perder combinaciones
     mix_por_rafaga: bool = False    # elegir primero la ráfaga y después la captura: una ocasión con
                                     # muchas capturas no domina las mezclas
     max_por_rafaga: int = 0         # capturas por ráfaga en train (0 = todas): baja los casi duplicados
@@ -126,6 +128,9 @@ class Config:
     bandas_hz: tuple = (0.0, 100.0, 300.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0)
                                     # bordes de bandas para energía fraccional
     rawfft_mascara: str = "todos"   # "todos" | "armonicas" | "impares": qué bins de rawfft se usan
+    rawfft_armonicas_tol: int | None = 2  # N = solo los bins a ±N de cada armónica k·f_red, pares e impares, hasta rawfft_fmax:
+                                    # son los únicos que recibe el modelo (299 con W=2048). None = usa rawfft_mascara
+    rawfft_extras: bool = False     # agrega al vector escalares de tiempo y espectro (RMS, pico, cresta, THD, centroide, bandas...)
     rawfft_f0: bool = True          # corrige el eje de frecuencia con la f0 estimada de cada ventana:
                                     # H_k cae en el mismo bin aunque la red se corra (sin esto, F1 0.46 a -0.5 Hz)
     rawfft_norm: str | None = None  # None | "h1": bins relativos a H1 + H1 como feature (forma + nivel)
@@ -140,6 +145,8 @@ class Config:
     modelo: str = "rf"              # rf|et|hgb|svm|knn|logreg
     multi_salida: str = "ovr"       # "ovr" = un clasificador binario por clase (exportable)
                                     # "nativo" = multi-output de sklearn (referencia)
+                                    # "cadena" = cada bosque recibe también la salida de los anteriores
+    cadena_orden: str = "grandes"   # "grandes" = primero las clases de mayor corriente | "chicas" = al revés
     n_estimators: int = 20          # 20x8 ≈ 276 KB de nodos en C y mejor F1 que 50x10
     max_depth: int | None = 8       # (3.2 MB) sobre 61 capturas; ver AGENTS.md
     hiperparams: dict = field(default_factory=dict)  # extras para el estimador
@@ -194,6 +201,8 @@ class Config:
             e.append(f"multi_salida={self.multi_salida!r} no está en {MULTI_SALIDAS}")
         if self.normalizar not in NORMALIZACIONES:
             e.append(f"normalizar={self.normalizar!r} no está en {NORMALIZACIONES}")
+        if self.cadena_orden not in ("grandes", "chicas"):
+            e.append("cadena_orden debe ser 'grandes' o 'chicas'")
         if self.umbral_criterio not in ("f1", "exact"):
             e.append("umbral_criterio debe ser 'f1' o 'exact'")
         if self.cv_grupo not in CV_GRUPOS:
@@ -224,6 +233,10 @@ class Config:
             e.append("notch_q debe ser > 0")
         if self.rawfft_mascara not in ("todos", "armonicas", "impares"):
             e.append("rawfft_mascara debe ser todos, armonicas o impares")
+        if self.rawfft_armonicas_tol is not None and (self.rawfft_armonicas_tol < 0 or self.rawfft_mascara != "todos"):
+            e.append("rawfft_armonicas_tol debe ser >= 0 y no se combina con rawfft_mascara")
+        if self.rawfft_extras and (self.rawfft_norm or self.franjas or self.estrategia != "rawfft"):
+            e.append("rawfft_extras requiere estrategia rawfft, sin rawfft_norm ni franjas")
         if self.rawfft_norm not in (None, "h1"):
             e.append("rawfft_norm debe ser None o 'h1'")
         if self.franjas and (self.rawfft_norm or self.estrategia != "rawfft" or self.multi_salida != "ovr"):
@@ -284,11 +297,13 @@ class Config:
         arb = f"{self.n_estimators}x{self.max_depth if self.max_depth is not None else 'inf'}"
         fase = "_fasealeat" if self.mix_fase == "aleatoria" else (
             f"_jit{self.mix_jitter_fase:g}" if self.mix_jitter_fase > 0 else "")
-        ms = "_nativo" if self.multi_salida == "nativo" else ""
+        ms = {"nativo": "_nativo", "cadena": f"_cadena{self.cadena_orden}"}.get(self.multi_salida, "")
         uc = "_uexact" if self.umbral_criterio == "exact" else ""
         cv = self.cv if self.cv == "lolo" else f"{self.cv}-{self.cv_grupo}"
         ext = "".join(s for s, v in (("_mascara" + self.rawfft_mascara, self.rawfft_mascara != "todos"), ("_f0", self.rawfft_f0),
-                                     ("_normh1", self.rawfft_norm), ("_franjas", self.franjas), ("_mixf0", self.mix_alinear_f0),
+                                     (f"_arm{self.rawfft_armonicas_tol}", self.rawfft_armonicas_tol is not None), ("_extras", self.rawfft_extras),
+                                     (f"_nfft{self.n_fft}", self.n_fft),
+                                     ("_normh1", self.rawfft_norm), ("_franjas", self.franjas), ("_mixf0", self.mix_alinear_f0), ("_mixlugar", self.mix_mismo_lugar),
                                      ("_mixarm", self.mix_armonicas_azar), ("_mixraf", self.mix_por_rafaga),
                                      (f"_max{self.max_por_rafaga}", self.max_por_rafaga), ("_trescala", self.train_escala),
                                      (f"_red{self.train_red_pct:g}", self.train_red_pct), (f"_fc{self.filtro_corriente:g}", self.filtro_corriente)) if v)

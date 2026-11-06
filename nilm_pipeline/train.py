@@ -90,6 +90,35 @@ class OvRFranjas:
         return P
 
 
+class OvRCadena:
+    """Un bosque binario por clase, en cadena: cada uno recibe también la salida de los anteriores.
+    Al entrenar ve las etiquetas reales de las clases previas; al predecir, sus probabilidades."""
+
+    def __init__(self, base, nombres: list, orden: str):
+        self.base, self.nombres, self.orden = base, nombres, orden
+
+    def fit(self, X: np.ndarray, Y: np.ndarray):
+        h1, solas = _h1_de_features(X, self.nombres), Y.sum(axis=1) == 1
+        corriente = [h1[solas & (Y[:, j] == 1)].mean() if (solas & (Y[:, j] == 1)).any() else 0.0 for j in range(Y.shape[1])]
+        self.orden_ = np.argsort(corriente)[::-1 if self.orden == "grandes" else 1]
+        self.estimators_, self.constante_ = [], []
+        Xc = X
+        for j in self.orden_:
+            constante = len(np.unique(Y[:, j])) < 2
+            self.constante_.append(float(Y[0, j]) if constante else None)
+            self.estimators_.append(None if constante else clone(self.base).fit(Xc, Y[:, j]))
+            Xc = np.hstack([Xc, Y[:, [j]].astype(np.float32)])
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        P = np.zeros((len(X), len(self.orden_)), dtype=np.float32)
+        Xc = X
+        for j, e, k in zip(self.orden_, self.estimators_, self.constante_):
+            P[:, j] = k if e is None else e.predict_proba(Xc)[:, 1]
+            Xc = np.hstack([Xc, P[:, [j]]])
+        return P
+
+
 def construir_modelo(cfg: Config, seed: int | None = None, clases: list | None = None, nombres: list | None = None):
     seed = cfg.seed if seed is None else seed
     hp = dict(cfg.hiperparams)
@@ -121,6 +150,8 @@ def construir_modelo(cfg: Config, seed: int | None = None, clases: list | None =
         warnings.warn(f"{cfg.modelo} no soporta multi-output nativo; se usa OvR")
     if cfg.franjas:
         return OvRFranjas(base, cfg.franjas, clases, nombres, cfg.f_red)
+    if cfg.multi_salida == "cadena":
+        return OvRCadena(base, nombres, cfg.cadena_orden)
     return OneVsRestClassifier(base, n_jobs=1)
 
 
@@ -190,14 +221,15 @@ def armar_conjunto_train(senales: list, Y: np.ndarray, grupos: np.ndarray, cfg: 
 
 
 def mezclas_de(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list, cfg: Config,
-               rng: np.random.Generator, total: int, prefijo: str, fs: float, rafagas: np.ndarray | None = None):
+               rng: np.random.Generator, total: int, prefijo: str, fs: float, rafagas: np.ndarray | None = None,
+               lugares: np.ndarray | None = None):
     """Mixes sintéticos desde un subconjunto de capturas, o None si no hay
     al menos 2 clases con individuales."""
     Yi = np.asarray(Y)
     individuales = Yi[Yi.sum(axis=1) == 1]
     if total <= 0 or len(np.unique(individuales.argmax(axis=1))) < 2:
         return None
-    return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo, fs, rafagas)
+    return sintetizar_combinadas(senales, Y, grupos, clases, cfg, rng, total, prefijo, fs, rafagas, lugares)
 
 
 def _perturbar_test(senales: list, cfg: Config, fs: float) -> list:
@@ -367,7 +399,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
     base = Dataset([r for r in ds.registros if r.tipo != TIPO_COMBINADA], clases)
     sen, Y, G = base.senales(), base.y(), base.grupos()
     sen_r, Y_r, G_r = _perturbar_test(reales.senales(), cfg, fs), reales.y(), reales.grupos()
-    R = base.rafagas()
+    R, Lug = base.rafagas(), base.lugares()
 
     bloques = {b: {"P": [], "Y": [], "grupos": [], "M": []} for b in ("ind", "mix")}
     F_comb = None
@@ -382,7 +414,7 @@ def run_experiment(ds: Dataset, cfg: Config, leaderboard: str | Path | None = No
 
         # --- train: individuales + mezclas (+ augment)
         m = mezclas_de(sen_tr, Y_tr, G_tr, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0,
-                       f"mixtr{k}", fs, R[tr])
+                       f"mixtr{k}", fs, R[tr], Lug[tr])
         if m is not None:
             sen_tr, Y_tr, G_tr = sen_tr + m.senales, np.vstack([Y_tr, m.Y]), np.concatenate([G_tr, m.grupos])
         F_tr, Yw_tr, _, nombres = armar_conjunto_train(sen_tr, Y_tr, G_tr, cfg, fs, rng)
@@ -592,7 +624,7 @@ def evaluar_test_congelado(ds: Dataset, cfg: Config, umbrales=None, verbose: boo
     rng = np.random.default_rng(cfg.seed)
     idx = _limitar_por_rafaga(np.arange(len(sen)), tr.rafagas(), cfg.max_por_rafaga, rng)
     sen, Y, G = [sen[i] for i in idx], Y[idx], G[idx]
-    m = mezclas_de(sen, Y, G, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixcong", fs, tr.rafagas()[idx])
+    m = mezclas_de(sen, Y, G, clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixcong", fs, tr.rafagas()[idx], tr.lugares()[idx])
     if m is not None:
         sen, Y, G = sen + m.senales, np.vstack([Y, m.Y]), np.concatenate([G, m.grupos])
     F, Yw, _, nombres = armar_conjunto_train(sen, Y, G, cfg, fs, rng)
@@ -629,7 +661,7 @@ def entrenar_final(ds: Dataset, cfg: Config, verbose: bool = True):
     rng = np.random.default_rng(cfg.seed)
     idx = _limitar_por_rafaga(np.arange(len(sen)), base.rafagas(), cfg.max_por_rafaga, rng)
     sen, Y, G = [sen[i] for i in idx], Y[idx], G[idx]
-    m = mezclas_de(sen, Y, G, ds.clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixfin", fs, base.rafagas()[idx])
+    m = mezclas_de(sen, Y, G, ds.clases, cfg, rng, cfg.mix_total if cfg.mix_habilitado else 0, "mixfin", fs, base.rafagas()[idx], base.lugares()[idx])
     if m is not None:
         sen, Y, G = sen + m.senales, np.vstack([Y, m.Y]), np.concatenate([G, m.grupos])
     F, Yw, _, nombres = armar_conjunto_train(sen, Y, G, cfg, fs, rng)

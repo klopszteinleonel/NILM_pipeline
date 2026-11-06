@@ -8,6 +8,8 @@ Cada variante se compara contra la base con las mismas semillas. Para cada una s
 Uso, desde la raíz de pipeline/:
     python3 tools/experimentos_eda.py --salida outputs/experimentos_eda.csv
     python3 tools/experimentos_eda.py --grupos cobertura nivel --semillas 3
+    python3 tools/experimentos_eda.py --grupos fft extras armonicas armonicas_extras      # contra todos los bins
+    python3 tools/experimentos_eda.py --grupos siguiente                                  # contra armónicos ±2
 """
 import argparse
 import os
@@ -26,9 +28,9 @@ from nilm_pipeline import Config, cargar_dataset, comparar_bootstrap, run_repeti
 AGRUPAR = {"calefon": "resistiva", "horno": "resistiva", "pava": "resistiva", "plancha": "resistiva",
            "airecalor": "aire"}
 # Base contra la que se hizo la auditoría del 2026-11-04. La base actual (Config por defecto) es
-# esta más mix_sesgo_grande_chica=0, mix_total=300, rawfft_f0=True y min_rafagas=2.
+# esta más mix_sesgo_grande_chica=0, mix_total=300, rawfft_f0=True, min_rafagas=2 y rawfft_armonicas_tol=2.
 BASE = Config(agrupar=AGRUPAR, excluir_clases=("parasito",), mix_sesgo_grande_chica=0.5, mix_total=100, rawfft_f0=False,
-              min_rafagas=1)
+              min_rafagas=1, rawfft_armonicas_tol=None)
 
 # Tabla de franjas que salió del EDA. Se dedujo mirando TODO el dataset, incluido el
 # lugar de test de cada fold, así que su resultado es algo optimista.
@@ -112,6 +114,35 @@ VARIANTES.update({
     ("combo", "5d_electronica"): (BASE.clonar(**_C5, agrupar={**AGRUPAR, **ELECTRONICA}), ELECTRONICA),
 })
 
+# Tamaño de FFT, features extra y solo armónicas, contra la base con todos los bins hasta 3 kHz
+BASE_ACTUAL = Config(agrupar=AGRUPAR, excluir_clases=("parasito",), rawfft_armonicas_tol=None)
+VARIANTES_ACTUAL = {
+    ("fft", "W4096"): BASE_ACTUAL.clonar(W=4096),
+    ("fft", "W8192"): BASE_ACTUAL.clonar(W=8192),
+    ("fft", "W2048_nfft4096"): BASE_ACTUAL.clonar(n_fft=4096),
+    ("fft", "W2048_nfft8192"): BASE_ACTUAL.clonar(n_fft=8192),
+    ("extras", "extras"): BASE_ACTUAL.clonar(rawfft_extras=True),
+}
+for _W in (2048, 4096, 8192):
+    for _tol in (0, 1, 2):
+        VARIANTES_ACTUAL["armonicas", f"W{_W}_tol{_tol}"] = BASE_ACTUAL.clonar(W=_W, rawfft_armonicas_tol=_tol)
+    VARIANTES_ACTUAL["armonicas_extras", f"W{_W}_tol1_extras"] = BASE_ACTUAL.clonar(W=_W, rawfft_armonicas_tol=1, rawfft_extras=True)
+
+# Sobre la base de armónicos ±2 bins (Config por defecto)
+BASE_ARMONICOS = Config(agrupar=AGRUPAR, excluir_clases=("parasito",))
+VARIANTES_ARMONICOS = {
+    ("siguiente", "arm_tol1"): BASE_ARMONICOS.clonar(rawfft_armonicas_tol=1),
+    ("siguiente", "mismo_lugar"): BASE_ARMONICOS.clonar(mix_mismo_lugar=True),
+    ("siguiente", "desfase15"): BASE_ARMONICOS.clonar(mix_jitter_fase=15.0),
+    ("siguiente", "desfase30"): BASE_ARMONICOS.clonar(mix_jitter_fase=30.0),
+    ("siguiente", "desfase45"): BASE_ARMONICOS.clonar(mix_jitter_fase=45.0),
+    ("siguiente", "cadena_grandes"): BASE_ARMONICOS.clonar(multi_salida="cadena", cadena_orden="grandes"),
+    ("siguiente", "cadena_chicas"): BASE_ARMONICOS.clonar(multi_salida="cadena", cadena_orden="chicas"),
+    ("siguiente", "mismo_lugar+desfase30"): BASE_ARMONICOS.clonar(mix_mismo_lugar=True, mix_jitter_fase=30.0),
+    ("siguiente", "mismo_lugar+cadena"): BASE_ARMONICOS.clonar(mix_mismo_lugar=True, multi_salida="cadena"),
+    ("siguiente", "desfase30+cadena"): BASE_ARMONICOS.clonar(mix_jitter_fase=30.0, multi_salida="cadena"),
+}
+
 
 def fila(nombre, grupo, rep, base, ds, mapa):
     c = comparar_bootstrap(ds, base, rep, "comb", mapa_a=mapa)
@@ -130,20 +161,39 @@ def main():
     ap.add_argument("--datos", default=os.path.join(os.path.dirname(__file__), "..", "..", "clienteTCP", "capturas_limpio"))
     ap.add_argument("--salida", default="outputs/experimentos_eda.csv")
     ap.add_argument("--semillas", type=int, default=5)
-    ap.add_argument("--grupos", nargs="*", default=None)
+    ap.add_argument("--grupos", nargs="*", default=None, help="sin esto corre la auditoría contra la base anterior")
     a = ap.parse_args()
 
     ds = cargar_dataset(a.datos)
     print(f"dataset {ds.manifest_hash[:10]}: {len(ds.registros)} capturas; {a.semillas} semillas", flush=True)
     t0 = time.time()
-    base = run_repetido(ds, BASE, n_semillas=a.semillas)
-    print(f"base: todas {base.media['todas_s_f1_micro']:.3f}±{base.desvio['todas_s_f1_micro']:.3f}  "
-          f"ind {base.media['ind_s_f1_micro']:.3f}  comb {base.media['comb_s_f1_micro']:.3f}  "
-          f"exact {base.media['comb_s_exact_match']:.3f}  nodos {base.media['nodos_totales']:.0f}", flush=True)
     filas = []
+    base_actual = None
+    for (grupo, nombre), cfg in list(VARIANTES_ACTUAL.items()) + list(VARIANTES_ARMONICOS.items()):
+        if not a.grupos or grupo not in a.grupos:
+            continue
+        if base_actual is None:
+            base_actual = run_repetido(ds, BASE_ARMONICOS if grupo == "siguiente" else BASE_ACTUAL, n_semillas=a.semillas)
+            print(f"base actual: todas {base_actual.media['todas_s_f1_micro']:.3f}  ind {base_actual.media['ind_s_f1_micro']:.3f}  "
+                  f"comb {base_actual.media['comb_s_f1_micro']:.3f}  exact {base_actual.media['comb_s_exact_match']:.3f}  "
+                  f"nodos {base_actual.media['nodos_totales']:.0f}", flush=True)
+        rep = run_repetido(ds, cfg, n_semillas=a.semillas)
+        f = fila(nombre, grupo, rep, base_actual, ds, None)
+        filas.append(f)
+        print(f"{grupo:10s} {nombre:22s} todas {f['todas_f1']:.3f} {f['dif_todas']:+.3f} {f['ic_todas']} | comb {f['comb_f1']:.3f} {f['dif_comb']:+.3f} {f['ic_comb']} | "
+              f"exact {f['comb_exact']:.3f} {f['dif_exact']:+.3f} {f['ic_exact']} | ind {f['ind_f1']:.3f} {f['dif_ind']:+.3f} | gana {f['gana_semillas']} | "
+              f"feats {f['n_features']:.0f} nodos {f['nodos']:.0f} | {time.time() - t0:.0f} s", flush=True)
+        os.makedirs(os.path.dirname(os.path.abspath(a.salida)), exist_ok=True)
+        pd.DataFrame(filas).to_csv(a.salida, index=False)
+    base = None
     for (grupo, nombre), (cfg, mapa) in VARIANTES.items():
         if a.grupos and grupo not in a.grupos:
             continue
+        if base is None:
+            base = run_repetido(ds, BASE, n_semillas=a.semillas)
+            print(f"base: todas {base.media['todas_s_f1_micro']:.3f}±{base.desvio['todas_s_f1_micro']:.3f}  "
+                  f"ind {base.media['ind_s_f1_micro']:.3f}  comb {base.media['comb_s_f1_micro']:.3f}  "
+                  f"exact {base.media['comb_s_exact_match']:.3f}  nodos {base.media['nodos_totales']:.0f}", flush=True)
         rep = run_repetido(ds, cfg, n_semillas=a.semillas)
         f = fila(nombre, grupo, rep, base, ds, mapa)
         filas.append(f)

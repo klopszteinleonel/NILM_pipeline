@@ -356,8 +356,9 @@ lavarropa y tele; tele (1 sola ráfaga, casa) aparece como falso positivo.
 Cuello de botella: pocas unidades distintas por clase, no el modelo.
 
 ## Auditoría de la Parte B contra el EDA (2026-11-04, dataset dfe60d02ca, 297 capturas)
-**Base actual (decisión del usuario, 2026-11-04): `Config(agrupar=..., excluir_clases=("parasito",))` = mix_sesgo_grande_chica=0,
-mix_total=300, rawfft_f0=True, min_rafagas=2.** Regla del usuario: una clase con pocas muestras se descarta hasta tener más
+**Base actual (decisión del usuario, 2026-11-06): `Config(agrupar=..., excluir_clases=("parasito",))` = mix_sesgo_grande_chica=0,
+mix_total=300, rawfft_f0=True, min_rafagas=2, rawfft_armonicas_tol=2. El notebook corre siempre también la referencia `CFG_BINS`
+(`rawfft_armonicas_tol=None`, 614 bins).** El barrido del notebook se recortó a propósito; el completo está en `tools/experimentos_eda.py`. Regla del usuario: una clase con pocas muestras se descarta hasta tener más
 (hoy hidro, secadorpelo y tele). Antes de sacar tele, LOLO 10 semillas: todas_s 0.732, ind 0.729, comb 0.734, comb exact 0.371, 15.2 k nodos.
 `nilm_features.h` implementa espectro -> features en C con la corrección de f0; `test_paridad_features`: 100 % de decisiones iguales
 partiendo del mismo espectro. Falta integrarlo al firmware (hoy el nodo solo captura) y verificar en la placa.
@@ -379,6 +380,18 @@ Base LOLO (10 semillas): todas_s 0.708, ind 0.743, comb 0.683, comb exact 0.277,
   aireinverter+lavarropa +9 dB (sintética − real); aire+calefon 0 dB. Hipótesis: alinear por la corriente ignora el ángulo respecto de V; probar alinear
   por fase de tensión con las capturas nuevas. El piso de las sintéticas de 2 cargas queda ~2.5 dB más alto.
 - ~50 variantes sobre los mismos 4 lugares: hay riesgo de selección; hace falta una casa nueva congelada para confirmar.
+
+## Tamaño de FFT, extras y solo armónicos (2026-11-06, 5 semillas contra la base actual: todas_s 0.786, comb 0.814, exact 0.464)
+Opciones de Config, apagadas: `W`, `n_fft`, `rawfft_extras`, `rawfft_armonicas_tol` (bins a ±N de k·50, con el sesgo de f0 compensado).
+- W4096 todas -0.016; W8192 -0.132 (1 ventana por captura de 1 s). Zero-padding (nfft 4096/8192): sin cambios, features ×2/×4.
+- Armónicos W2048: ±0 -0.019 (60 feats), ±1 -0.014 (180), ±2 -0.002 (299, misma performance con la mitad de features, 13 k nodos).
+  W4096 ±1/±2 -0.007/-0.008; W8192 ±1/±2 -0.032. Nunca reduce nodos respecto de la base salvo por la W más larga.
+- extras +0.006 (no significativo). Armónicos ±1 + extras: W2048 +0.007, W4096 +0.004 con 7.7 k nodos, W8192 -0.004 con 4.9 k (exact -0.075).
+- Todas estables con f0 ±0.5 Hz. Armónicos sin extras exportan a C (paridad OK); `rawfft_extras` no se exporta todavía.
+
+## Mezclas por lugar, desfase y cadena (2026-11-06, 5 semillas contra armónicos ±2: todas_s 0.785, comb 0.813, exact 0.470)
+`mix_mismo_lugar` -0.018 (IC excluye 0, exact -0.066). `mix_jitter_fase` ±15/30/45° -0.004/-0.010/-0.007, exact -0.03 a -0.05; apenas corrige el error de H3
+(heladera+luces 13.5 → 8.6 dB con ±45°). `multi_salida="cadena"` 0.000. Armónicos ±1: -0.012. Ninguna supera a la base. Falta probar lo que usa tensión.
 
 ## Hallazgos del EDA que ya no están en el notebook (limpieza 2026-11-05; código en el commit 7916c79)
 - THD: resistivas 0.02, heladera 0.17, aire 0.22, lavarropa 0.49, aireinverter 0.79, tele/luces ~1.2.

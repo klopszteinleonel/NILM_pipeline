@@ -279,7 +279,7 @@ def exportar(modelo, cfg: Config, fs: float, nombres: list, clases: list, carpet
              umbrales=None) -> dict:
     """Escribe nilm_modelo.h, nilm_config.h, pipeline_config.json y modelo.joblib.
     Devuelve dict con rutas, costo y tamaños en KB."""
-    no_exportable = [n for n, v in (("rawfft_norm", cfg.rawfft_norm), ("franjas", cfg.franjas),
+    no_exportable = [n for n, v in (("rawfft_norm", cfg.rawfft_norm), ("franjas", cfg.franjas), ("rawfft_extras", cfg.rawfft_extras), ("multi_salida='cadena'", cfg.multi_salida == "cadena"),
                                     ("filtro_corriente", cfg.filtro_corriente)) if v]
     if no_exportable:
         raise NotImplementedError(f"el export a C todavía no implementa: {no_exportable}. Son variantes experimentales.")

@@ -117,7 +117,8 @@ def _tercios(rms: dict) -> tuple[list, list]:
 
 def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clases: list,
                           cfg: Config, rng: np.random.Generator, total: int,
-                          prefijo: str = "mix", fs: float = 10000.0, rafagas: np.ndarray | None = None) -> Mezclas:
+                          prefijo: str = "mix", fs: float = 10000.0, rafagas: np.ndarray | None = None,
+                          lugares: np.ndarray | None = None) -> Mezclas:
     """Genera `total` mezclas de K ∈ mix_k cargas desde capturas individuales.
 
     - Solo usa capturas con exactamente una clase activa como fuente de cargas
@@ -154,13 +155,19 @@ def sintetizar_combinadas(senales: list, Y: np.ndarray, grupos: np.ndarray, clas
             extra = rng.choice(resto, size=faltan, replace=cfg.mix_misma_clase)
             elegidas += [str(x) for x in np.atleast_1d(extra)]
 
+        fuentes = {c: por_clase[c] for c in elegidas}
+        if cfg.mix_mismo_lugar and lugares is not None:
+            comunes = set.intersection(*(set(lugares[por_clase[c]]) for c in elegidas))
+            if comunes:
+                lugar = rng.choice(sorted(comunes))
+                fuentes = {c: por_clase[c][lugares[por_clase[c]] == lugar] for c in elegidas}
         if cfg.mix_por_rafaga and rafagas is not None:
             idx = []
             for c in elegidas:
-                r = rng.choice(np.unique(rafagas[por_clase[c]]))
-                idx.append(int(rng.choice(por_clase[c][rafagas[por_clase[c]] == r])))
+                r = rng.choice(np.unique(rafagas[fuentes[c]]))
+                idx.append(int(rng.choice(fuentes[c][rafagas[fuentes[c]] == r])))
         else:
-            idx = [int(rng.choice(por_clase[c])) for c in elegidas]
+            idx = [int(rng.choice(fuentes[c])) for c in elegidas]
 
         out_senales.append(combinar([senales[j] for j in idx], rng, cfg.mix_escala, fs,
                                     cfg.f_red, cfg.mix_fase, cfg.mix_jitter_fase,
