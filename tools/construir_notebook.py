@@ -7,12 +7,13 @@ def code(s): celdas.append({"cell_type": "code", "metadata": {}, "execution_coun
 md("""
 # NILM — análisis exploratorio y pipeline de clasificación
 
-El notebook tiene dos partes independientes, que comparten solo la celda de setup:
+El notebook tiene tres partes, que comparten la celda de setup:
 
 - **Parte A: Análisis Exploratorio de Datos (EDA).** No entrena nada. Para correr solo esta parte: ejecutá el setup y las celdas A, y frená antes de la Parte B.
 - **Parte B: pipeline de clasificación.** Validación, barridos y export al ESP32-S3.
+- **Parte C: eventos y resta con fase.** Valida la idea de la placa en tiempo real: clasificar la diferencia entre el antes y el después de que una carga se prende o se apaga. Usa `ds` y `CFG` de las celdas B1 y B2.
 
-La lógica vive en el paquete `nilm_pipeline/` (repo `NILM_pipeline`): `eda.py` para la Parte A y el resto para la Parte B.
+La lógica vive en el paquete `nilm_pipeline/` (repo `NILM_pipeline`): `eda.py` para la Parte A, `eventos.py` para la Parte C y el resto para la Parte B.
 
 **Fuentes (GitHub, repos privados)**:
 - código: `github.com/klopszteinleonel/NILM_pipeline`
@@ -575,6 +576,149 @@ code("""
 CONGELADO = ()          # ej. ("casa_nueva",) — nombres de lugar o de sesión
 if CONGELADO:
     print(evaluar_test_congelado(ds, MEJOR.clonar(test_congelado=CONGELADO)))
+""")
+
+md("""
+# Parte C: eventos y resta con fase
+La idea para la placa en tiempo real: en vez de clasificar la suma de todo lo que está prendido, detectar cuándo una carga se prende o se apaga y clasificar **la diferencia** entre el antes y el después. Esa diferencia es la carga sola, que es lo que el modelo mejor reconoce, aunque esté tapada por otra más grande.
+
+**Los datos.** `eventos/` tiene capturas de 5 s, con corriente y tensión (`--canal iv`), en las que una carga se prende o se apaga en el medio. **No entran al entrenamiento ni a las combinadas** (`data.py` ignora la carpeta): son solo para validar esta idea. Las referencias son las individuales con tensión del mismo aparato (`--equipo`).
+
+**Por qué hace falta la tensión.** Cada armónica tiene amplitud y ángulo, y las corrientes de cargas en paralelo se suman con su ángulo: la H3 de dos cargas puede sumar, o restarse si están en contra. Para recuperar la carga nueva hay que restar armónica por armónica con su ángulo, y para eso el ángulo de antes y el de después tienen que medirse desde el mismo cero. La corriente no sirve de referencia, porque su ángulo cambia justamente con el evento (al prender una pava junto al aire, la corriente total pasa de atrasar ~13° a atrasar ~3.5°). La tensión la impone la red y no se mueve: cada ciclo se corta en su cruce ascendente, y así los ciclos de antes y de después quedan en la misma escala.
+
+**Por qué se resta el ciclo promedio.** Algunos motores tienen componentes que no están enganchadas a la red (C3). Restar muestra a muestra deja residuos de las cargas del fondo; promediando ~1 s de cada lado se cancelan.
+
+Depende de `ds` (B1) y `CFG` (B2). La lógica está en `nilm_pipeline/eventos.py`. Los textos "Lectura" comentan las capturas de depaleo del 2026-11-09.
+""")
+
+md("""
+## C1. Eventos detectados
+Un evento es un salto de la potencia por ciclo (más de 8 W o 1 %). Entre saltos quedan las mesetas: se descartan 15 ciclos después de cada salto, o 40 si hubo un pico de arranque. Qué carga cambió se deduce del estado: la meseta inicial es la carga cuya individual tiene la potencia más parecida, un encendido es la carga que faltaba y un apagado, la más parecida entre las que estaban. Un escalón con menos de la mitad o más del doble de la potencia de la carga se marca **parcial** (una etapa de un motor, una lámpara que parpadea) y queda fuera de los resúmenes.
+
+En los gráficos: corriente RMS por ciclo (azul), potencia (rojo) y, en gris, el tramo descartado alrededor de cada evento.
+""")
+code("""
+from nilm_pipeline import eventos
+caps_ev, evs, refs_ev = eventos.cargar_eventos(RUTA_DATOS)
+print(f"{len(caps_ev)} capturas con eventos, {len(evs)} eventos ({sum(e.parcial for e in evs)} parciales); "
+      f"{len(refs_ev)} individuales con tensión como referencia")
+eventos.plot_perfiles(caps_ev, evs)
+plt.show()
+""")
+md("""
+**Lectura.**
+- **Los escalones son muy limpios**: una resistiva entra en 1 o 2 ciclos. Algunas capturas tienen el encendido y el apagado.
+- **El aire oscila** unos ±40 mA con un período de ~0.6 s. Es del mismo orden que unas luces (~85 mA), así que define el escalón más chico que se puede detectar con él andando.
+- **`heladera+aire` muestra un arranque por etapas**: primero el ventilador (~120 W, por eso queda parcial), después el compresor con un pico de 19 A. Quedan apenas 0.15 s estables al final: hace falta capturar más tiempo después de prender un motor.
+- **En `pava+luces` (142904) aparece un escalón de 10 W** cerca del final: probablemente una lámpara que parpadeó. Queda parcial.
+""")
+
+md("""
+## C2. La resta con fase contra la individual
+Para cada evento, la diferencia (ciclo promedio después − antes, con su ángulo) contra la individual del mismo aparato más cercana en el tiempo:
+
+- `e_H1`: error relativo de la fundamental.
+- `e_arm_fase`: error de H2 a H25, dividido por la fundamental de la individual.
+- `e_arm_magnitud`: lo mismo, pero restando solo amplitudes (sin fase), que es lo que se podría hacer sin la tensión.
+
+La primera tabla es el **piso**: cuánto difieren entre sí dos individuales del mismo aparato. Una resta no puede dar mejor que eso.
+""")
+code("""
+display(eventos.piso_individual(refs_ev).round(3))
+tabla_ev = eventos.tabla_eventos(evs)
+display(tabla_ev.round(3))
+display(eventos.resumen_resta(tabla_ev))
+""")
+code("""
+EJEMPLOS = ("heladera+luces", "aire+luces")      # el primer evento de cada combinación
+for nombre in EJEMPLOS:
+    e = next((e for e in evs if nombre in e.captura.nombre and not e.parcial), None)
+    if e is not None:
+        eventos.plot_resta(e)
+plt.show()
+""")
+md("""
+**Lectura.**
+- **Resistivas: la resta es casi exacta.** La fundamental queda a 1–2 % de la individual y la potencia también. En `heladera+pava` la diferencia da 1940 W contra 1797 W: es la tensión (224 contra 216 V), porque la potencia de una resistiva crece con V².
+- **`luces` sobre `heladera`: la fase es lo que hace la diferencia.** Con fase, el error de armónicas (0.20–0.25) queda al nivel del piso de dos capturas de `luces` entre sí (0.31). Restando solo amplitudes da ~1.0: la H3 de la diferencia sale en 10 mA en vez de 68, porque las H3 de la heladera y de las luces se restan en parte.
+- **`luces` sobre `aire` sale peor** (0.13 a 1.6): las componentes del aire que no están enganchadas a la red (C3) no se cancelan del todo en las mesetas cortas. Las impares de las luces igual salen bien: H3 65–75 mA contra 68 de la individual, H5 45–57 contra 48.
+- **En las resistivas, con y sin fase dan parecido** porque sus armónicas son casi nulas: lo que importa ahí es la fundamental.
+""")
+
+md("""
+## C3. Componentes del aire que no están enganchadas a la red
+Ángulo de cada armónica del aire TCL, ciclo a ciclo, medido desde el cruce de la tensión. Una componente enganchada a la red mantiene el ángulo; una que no lo está gira, y su promedio tiende a cero.
+""")
+code("""
+cap_aire = eventos.cargar_iv(RUTA_DATOS, "aire/20261109_140836_aire.json")
+if cap_aire is not None:
+    display(eventos.tabla_asincronia(cap_aire))
+    eventos.plot_asincronia(cap_aire)
+    plt.show()
+""")
+md("""
+**Lectura.**
+- **Las impares están enganchadas a la red** (giran menos de 7°/s) y su promedio vale lo mismo que cada ciclo.
+- **Las "pares" no son armónicas**: giran ~370°/s, una vuelta por segundo. Están en ~99, ~199, ~299 Hz: la red más la velocidad de giro del motor, que va un poco por debajo de 50 vueltas/s. Por eso el promedio de 1 s de H2 da 12 mA y cada ciclo, 593 mA.
+- **Para la clasificación de siempre no cambia nada**: las features toman ±2 bins de cada armónico (±10 Hz), que incluyen ese corrimiento de 1 Hz.
+- **Para la resta sí**: hay que promediar ~1 s, y cuando el aire es la carga nueva el ciclo promedio pierde estas componentes. Todavía no hay encendidos de aire evaluables para ver si eso le cambia la clase.
+""")
+
+md("""
+## C4. Clasificar la diferencia
+Para cada lugar con eventos se entrena **sin ese lugar** (casa nunca vista) y se comparan dos decisiones:
+
+- **Suma**: el modelo clasifica la meseta posterior, que es lo que hace hoy el pipeline. Acierta si da exactamente las cargas activas, con umbral 0.5.
+- **Diferencia**: el modelo clasifica el ciclo de la diferencia, repetido 50 veces. Como en un evento cambia una sola carga, se elige la clase más probable.
+
+Se prueban dos modelos: la base (con 300 mezclas sintéticas) y uno entrenado solo con individuales (`mix_total=0`). Entran los eventos no parciales con al menos 11 ciclos de cada lado.
+""")
+code("""
+N_SEMILLAS_EVENTOS = 3
+MODELOS_EV = {"con mezclas": CFG, "solo individuales": CFG.clonar(mix_total=0)}
+det_ev, nodos_ev = eventos.clasificar_eventos(ds, evs, MODELOS_EV, semillas=N_SEMILLAS_EVENTOS)
+print("nodos por modelo:", nodos_ev)
+display(eventos.resumen_clasificacion(det_ev))
+display(det_ev[det_ev["semilla"] == 0].drop(columns=["lugar", "semilla"]))
+""")
+md("""
+**Lectura** (28 eventos, todos de depaleo, 3 semillas).
+- **La diferencia acierta más que la suma**: 0.82 con mezclas y 0.92 con solo individuales, contra 0.48 de la suma exacta con mezclas. La suma encuentra `luces` en 4 de 39 casos (solo junto a la pava); tapadas por el aire, la heladera o el calefón, el modelo no las ve.
+- **Para la diferencia, el modelo sin mezclas es mejor**: encuentra `luces` en 10 de 15 (con mezclas, 0 de 15). Una interpretación: las mezclas le enseñan a buscar cargas tapadas por otras, y en la diferencia no hay nada tapado.
+- **Pero sin mezclas, la suma colapsa** (0.11): nunca aprendió combinaciones.
+- **El modelo de solo individuales es 10 veces más chico**: ~1300 nodos contra ~13 000 (≈ 16 KB contra 160 KB en C).
+- **`luces` en una casa nueva sigue siendo dudosa**: la clase más probable es la correcta, pero con probabilidad 0.2–0.6. Las lámparas de depaleo no se parecen mucho a las de otras casas.
+- **Es poco**: 28 eventos, una casa, y solo resistivas y luces como carga nueva.
+""")
+
+md("""
+## C5. La misma pregunta en todo el dataset
+La diferencia de un evento limpio es la carga sola, así que en una casa nueva debería acertar más o menos como acierta la clase más probable sobre las individuales de esa casa. Eso se puede medir con la validación por lugar de siempre, sobre todo el dataset y todas las clases. Reusa `rep` de B5 si ya se corrió.
+""")
+code("""
+N_SEM_C5 = globals().get("N_SEMILLAS", 5)
+rep_mix = rep if "rep" in globals() else run_repetido(ds, CFG, n_semillas=N_SEM_C5)
+rep_ind = run_repetido(ds, CFG.clonar(mix_total=0), n_semillas=N_SEM_C5)
+filas = {}
+for nombre, r in (("con mezclas", rep_mix), ("solo individuales", rep_ind)):
+    top1, por_clase = eventos.top1_individuales(r)
+    filas[nombre] = {"top1_individuales": top1, **{f"top1_{c}": v for c, v in por_clase.items()},
+                     "comb_f1 (suma)": r.media["comb_s_f1_micro"], "comb_exact (suma)": r.media["comb_s_exact_match"],
+                     "nodos": r.media["nodos_totales"]}
+pd.DataFrame(filas).T.round(3)
+""")
+md("""
+**Lectura** (317 capturas, 5 semillas).
+- **Solo individuales: 0.936 de acierto**; con mezclas, 0.881. Confirma lo de C4 con todas las clases: para clasificar una carga sola, las mezclas estorban.
+- **Por clase, sin mezclas**: `heladera`, `lavarropa`, `resistiva` y `aire` quedan en 0.97–1.00; `luces` 0.82 (0.64 con mezclas) y `aireinverter` 0.58 (0.40). Esas dos fallan aun como cargas solas, porque cada casa tiene equipos distintos: eso lo arreglan más casas, no el método.
+- **Para la suma, las mezclas son imprescindibles**: sin ellas, combinadas exact cae a 0.012.
+
+**Conclusión: dos modelos con roles distintos.** El de individuales clasifica cada evento; el de mezclas da el estado cuando no hay un evento que lo explique (al arrancar la placa, con cargas ya prendidas) y verifica cada tanto que el estado armado con eventos siga coincidiendo con la suma.
+
+**Lo que falta medir:**
+- Encendidos de motores (`aire`, `heladera`, `lavarropa`) con al menos 2 s estables después del arranque.
+- Eventos en otras casas: con dos o más lugares, C4 pasa a ser una validación por lugar de verdad.
+- Una salida "carga desconocida" para cuando la clase más probable tiene probabilidad baja: un aparato que el modelo nunca vio igual tiene que registrar su consumo.
 """)
 
 nb = {"cells": celdas, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},

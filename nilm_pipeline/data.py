@@ -8,7 +8,8 @@ Ingesta del dataset NILM.
     * combinadas:     capturas_limpio/combinadas/archivo.json    (categoria="aire,tele")
     * sin carga:      cualquier carpeta, categoria="nada"         → vector cero
 - Se ignoran las carpetas de CARPETAS_IGNORADAS: `eventos/` tiene capturas con cargas que se
-  prenden o apagan durante la medición (la etiqueta vale solo para una parte de la señal).
+  prenden o apagan durante la medición (solo para validar la resta de eventos); `aparte/` guarda
+  capturas que no van al entrenamiento (heladera vieja de depaleo con el router, router solo).
 - Las etiquetas se representan multi-hot sobre la lista global de clases
   ("nada" es una categoria reservada: no es clase, su etiqueta es todo cero).
 - Cada captura es su propio "grupo" (clave para la validación anti-leakage).
@@ -28,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 NOMBRE_CARPETA_COMBINADAS = "combinadas"
-CARPETAS_IGNORADAS = ("eventos",)
+CARPETAS_IGNORADAS = ("eventos", "aparte")
 CAMPOS_MANIFEST = ["ruta", "tipo", "categoria", "clases", "lugar", "sesion", "rafaga", "fs",
                    "duracion", "muestras", "sha1", "fecha_archivo"]
 

@@ -55,6 +55,11 @@ Flujo: entrenamiento/experimentación en Google Colab → export a C para el bor
     abajo a float32 para preservar `f32 <= thr64`.
   - `eda.py` — Parte A del notebook (EDA, no entrena): inventario, forma de onda, `fft_por_clase` (media y desvío; por defecto
     señal completa + f0) y `comparar_combinada` (real, individuales y sintética). Los `plot_*` admiten rangos con `paso`.
+  - `eventos.py` — Parte C del notebook: capturas de `eventos/` (iv) cortadas en ciclos en el cruce ascendente de V,
+    saltos de P por ciclo y mesetas, etiqueta de la carga que cambió por estado + potencia de su individual
+    (`referencias` = individuales con V del mismo `equipo`), resta con fase contra la individual (`tabla_eventos`,
+    `piso_individual`), `tabla_asincronia` (componentes no enganchadas a la red), `clasificar_eventos` (modelo sin el
+    lugar de los eventos: suma vs diferencia, con mezclas vs solo individuales) y `top1_individuales` (proxy LOLO).
 
 ## Flujo por fold (para train.py)
 ```
@@ -406,8 +411,14 @@ Opciones de Config, apagadas: `W`, `n_fft`, `rawfft_extras`, `rawfft_armonicas_t
   aireinverter tienen varios regímenes; heladera baja de corriente con el tiempo (0.59→0.44 A, 0.72→0.61 A).
 
 ## Eventos, heladera de depaleo y router (2026-11-09, capturas iv nuevas de depaleo)
-`data.py` ignora `eventos/` (CARPETAS_IGNORADAS): son capturas de 5 s donde una carga se prende o apaga en el medio.
-`eventos/20261109_143141_aire+luces.json` y `..._143204_...` son idénticos byte a byte (falta confirmar con el usuario cuál borrar).
+`data.py` ignora `eventos/` y `aparte/` (CARPETAS_IGNORADAS). `eventos/` = capturas de 5 s donde una carga se prende o apaga en
+el medio; son SOLO para validar la resta de eventos, nunca combinadas. `aparte/` = heladera vieja de depaleo (con router) y router solo.
+Dataset para entrenar desde el 2026-11-09: 317 capturas (heladera: local 8, depaleo 7 aisladas, depamica 3).
+`eventos/..._143204_aire+luces` era idéntico a `..._143141_` (I y V): el nodo reenvió el buffer anterior sin medir. Se borró.
+Causa probable (sin confirmar): el driver de timer de IDF 4.4 rehabilita la alarma después del callback, así que
+`timerAlarmDisable` dentro del ISR no la frena; en el caso 1 del loop se pone `midiendo = true` antes de `count = 0`, y un tick en
+ese hueco ve el `count` viejo, cierra la medición y el loop envía el buffer anterior. Arreglado en el firmware el 2026-11-09
+(timer detenido entre mediciones, `count = 0` antes de `midiendo = true`, guarda de rango en el ISR); falta probarlo en la placa.
 - Resta de eventos con fase (ciclos cortados en el cruce ascendente de V y remuestreados a 200 puntos): resistivas
   e_H1 1–2 %, ΔP ±2 % (escala con V²). `luces` sobre `heladera`: error al nivel de una individual contra otra; restar magnitudes
   da error ~1.0 (las armónicas suman con fase).
@@ -419,6 +430,15 @@ Opciones de Config, apagadas: `W`, `n_fft`, `rawfft_extras`, `rawfft_armonicas_t
   (base con mezclas) y 21–23/23 (solo individuales, mix_total=0); clasificar la suma posterior acierta exacto 7–11/23.
   `luces` sobre la diferencia queda con p < 0.5 aunque sea la más probable. Falta: eventos de motores (aire, heladera) con
   más de ~1 s después del arranque; el modelo de eventos debería entrenarse sobre individuales promediadas en sincronía.
+- Proxy en todo el dataset (LOLO 5 semillas, 317 capturas, top-1 sobre individuales de casa nueva = clasificar la diferencia
+  de un evento limpio): solo individuales (mix_total=0) 0.936 vs base con mezclas 0.881 (sin mezclas: aireinverter 0.58,
+  luces 0.82, aire 0.97, heladera/lavarropa/resistiva ≥ 0.99). Pero sin mezclas el clasificador de la suma colapsa
+  (comb F1 0.505, exact 0.012): las mezclas siguen haciendo falta para el estado inicial y la verificación.
+  (Una primera cuenta dio 0.854/0.799 y aire 0.67: contaba las capturas `nada` como aire. Corregido en `top1_individuales`.)
+- Notebook Parte C (`eventos.py`: mesetas completas, diferencia repetida 50 ciclos, 28 eventos no parciales, 3 semillas):
+  diferencia 0.82 con mezclas / 0.92 solo individuales (luces 0/15 vs 10/15); suma exacta 0.48 / 0.11. Nodos: 13 250 con
+  mezclas vs 1 308 solo individuales (~10× más chico). Propuesta: dos modelos en la placa (individuales para eventos,
+  mezclas para el estado inicial y la verificación).
 - Heladera vieja de depaleo (20261005, 4 capturas) = heladera + fuente del router (55 mA, H3–H9 ~20 mA, hasta ~2 kHz).
   LOLO 5 semillas (todas / ind / comb / comb exact): como antes 0.785/0.742/0.813/0.470; sin la vieja 0.776/0.722/0.811/0.463;
   nueva en lugar de vieja 0.787/0.739/0.820/0.471 (heladera ind R 0.61 → 0.78, comb R 0.58 → 0.48); todo lo nuevo
