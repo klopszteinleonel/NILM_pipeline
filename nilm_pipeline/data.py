@@ -7,6 +7,8 @@ Ingesta del dataset NILM.
     * individuales:   capturas_limpio/<categoria>/archivo.json   (categoria="aire")
     * combinadas:     capturas_limpio/combinadas/archivo.json    (categoria="aire,tele")
     * sin carga:      cualquier carpeta, categoria="nada"         → vector cero
+- Se ignoran las carpetas de CARPETAS_IGNORADAS: `eventos/` tiene capturas con cargas que se
+  prenden o apagan durante la medición (la etiqueta vale solo para una parte de la señal).
 - Las etiquetas se representan multi-hot sobre la lista global de clases
   ("nada" es una categoria reservada: no es clase, su etiqueta es todo cero).
 - Cada captura es su propio "grupo" (clave para la validación anti-leakage).
@@ -26,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 NOMBRE_CARPETA_COMBINADAS = "combinadas"
+CARPETAS_IGNORADAS = ("eventos",)
 CAMPOS_MANIFEST = ["ruta", "tipo", "categoria", "clases", "lugar", "sesion", "rafaga", "fs",
                    "duracion", "muestras", "sha1", "fecha_archivo"]
 
@@ -201,8 +204,12 @@ def escanear(data_dir: str | Path, clase_nada: str = CLASE_NADA) -> tuple[list, 
     data_dir = Path(data_dir)
     filas, problemas = [], []
     n_tension = 0
+    n_ignorados = 0
     for ruta in sorted(data_dir.rglob("*.json")):
         rel = ruta.relative_to(data_dir).as_posix()
+        if set(Path(rel).parts[:-1]) & set(CARPETAS_IGNORADAS):
+            n_ignorados += 1
+            continue
         try:
             p = _leer_captura(ruta)
             if p.get("magnitud", "corriente") != "corriente":
@@ -228,6 +235,8 @@ def escanear(data_dir: str | Path, clase_nada: str = CLASE_NADA) -> tuple[list, 
             })
         except Exception as e:
             problemas.append(f"{rel}: error al leer ({e})")
+    if n_ignorados:
+        problemas.append(f"{n_ignorados} archivo(s) en carpetas ignoradas {CARPETAS_IGNORADAS} omitidos")
     if n_tension:
         problemas.append(f"{n_tension} archivo(s) de tension (magnitud != corriente) omitidos")
     return filas, problemas

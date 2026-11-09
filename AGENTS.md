@@ -405,6 +405,25 @@ Opciones de Config, apagadas: `W`, `n_fft`, `rawfft_extras`, `rawfft_armonicas_t
 - Firmas acumuladas y distribución/outliers (también en 7916c79 o antes): sin etiquetas claramente erróneas; lavarropa, heladera, aire y
   aireinverter tienen varios regímenes; heladera baja de corriente con el tiempo (0.59→0.44 A, 0.72→0.61 A).
 
+## Eventos, heladera de depaleo y router (2026-11-09, capturas iv nuevas de depaleo)
+`data.py` ignora `eventos/` (CARPETAS_IGNORADAS): son capturas de 5 s donde una carga se prende o apaga en el medio.
+`eventos/20261109_143141_aire+luces.json` y `..._143204_...` son idénticos byte a byte (falta confirmar con el usuario cuál borrar).
+- Resta de eventos con fase (ciclos cortados en el cruce ascendente de V y remuestreados a 200 puntos): resistivas
+  e_H1 1–2 %, ΔP ±2 % (escala con V²). `luces` sobre `heladera`: error al nivel de una individual contra otra; restar magnitudes
+  da error ~1.0 (las armónicas suman con fase).
+- Las "armónicas pares" del aire TCL NO están enganchadas a la red: su fase gira ~1 vuelta/s (componentes en ~99, ~199 Hz =
+  f0 + f_rotor del motor). El promedio sincrónico las cancela solo en ventanas de ~1 s; la resta muestra a muestra deja
+  residuos de los motores del fondo (aire, heladera) que el modelo lee como aire/heladera. Con la resta de ciclos promedio
+  se eliminan. Las features con ±2 bins ya cubren ese corrimiento de 1 Hz.
+- Clasificar la diferencia (modelo entrenado sin depaleo, 23 eventos ON, 3 semillas): argmax de la diferencia sincrónica 18/23
+  (base con mezclas) y 21–23/23 (solo individuales, mix_total=0); clasificar la suma posterior acierta exacto 7–11/23.
+  `luces` sobre la diferencia queda con p < 0.5 aunque sea la más probable. Falta: eventos de motores (aire, heladera) con
+  más de ~1 s después del arranque; el modelo de eventos debería entrenarse sobre individuales promediadas en sincronía.
+- Heladera vieja de depaleo (20261005, 4 capturas) = heladera + fuente del router (55 mA, H3–H9 ~20 mA, hasta ~2 kHz).
+  LOLO 5 semillas (todas / ind / comb / comb exact): como antes 0.785/0.742/0.813/0.470; sin la vieja 0.776/0.722/0.811/0.463;
+  nueva en lugar de vieja 0.787/0.739/0.820/0.471 (heladera ind R 0.61 → 0.78, comb R 0.58 → 0.48); todo lo nuevo
+  0.787/0.757/0.808/0.432±0.044. El router NO explica la falla de heladera en combinadas (son todas de depamica).
+
 ## Captura de combinadas reales y sin carga
 - `clienteTCP/capturar.py` acepta comas desde 2026-09-20:
   `--categoria "aire,tele"` (archivo `<ts>_aire+tele.json`, la coma se guarda
